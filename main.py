@@ -1221,56 +1221,54 @@ class TelegramBot:
             await update.message.reply_text(f"خطأ في جلب التحليل: {e}")
 
     # =====================================================================
-    # 🔹 الدالة المعدلة positions – تعرض البيانات مباشرة من API
+    # 🔹 الدالة المعدلة positions – تستخدم HTML بدلاً من Markdown مع تنظيف النصوص
     # =====================================================================
     async def positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         trades = self.db.get_open_trades()
         if not trades:
-            await update.message.reply_text("لا توجد صفقات مفتوحة حالياً.")
+            await update.message.reply_text("لا توجد صفقات مفتوحة حالياً. 💤")
             return
-        msg = "📊 **الصفقات المفتوحة**\n\n"
-        for t in trades:
-            # تنظيف البيانات
-            symbol = t.get('symbol', 'UNKNOWN').replace(':USDT', '')
-            side = t.get('side', 'UNKNOWN')
             
-            # تقليم الأرقام الطويلة جداً (مثل 0.0028219748) إلى 6 أرقام عشرية
-            entry_price = round(float(t.get('entry_price', 0)), 6)
-            sl_price = round(float(t.get('sl_price', 0)), 6)
-            tp_price = round(float(t.get('tp_price', 0)), 6)
+        msg = "📊 <b>الصفقات المفتوحة</b>\n\n"
+        for t in trades:
+            symbol = str(t.get('symbol', 'UNKNOWN')).replace(':USDT', '')
+            side = str(t.get('side', 'UNKNOWN'))
+            
+            entry_price = round(float(t.get('entry_price') or 0), 6)
+            sl_price = round(float(t.get('sl_price') or 0), 6)
+            tp_price = round(float(t.get('tp_price') or 0), 6)
             
             leverage = t.get('leverage_used', 1)
             slot = t.get('slot_used', '?')
             score = t.get('confidence', 0)
-            regime = t.get('regime', 'غير محدد')
-            ai_exp = t.get('ai_explanation', '')
+            regime = str(t.get('regime', 'غير محدد'))
+            ai_exp = str(t.get('ai_explanation', '')).replace('<', '').replace('>', '') # تنظيف لحماية HTML
+            
             direction_emoji = '🟢 LONG' if side == 'LONG' else '🔴 SHORT'
 
-            # 1. معلومات الصفقة الأساسية
-            msg += f"• **{symbol}**\n"
+            msg += f"• <b>{symbol}</b>\n"
             msg += f"الاتجاه: {direction_emoji} | الرافعة: x{leverage} (Slot {slot})\n"
-            msg += f"الدخول: `{entry_price}`\n"
-            msg += f"الوقف: `{sl_price}` | الهدف: `{tp_price}`\n"
-
-            # 2. أسباب الدخول (من البوت الأول)
+            msg += f"الدخول: <code>{entry_price}</code>\n"
+            msg += f"الوقف: <code>{sl_price}</code> | الهدف: <code>{tp_price}</code>\n"
             msg += f"قوة الدخول: {score:.1f}/100 | السوق: {regime}\n"
+            
             if ai_exp:
-                msg += f"💬 **سبب الدخول (AI):** _{ai_exp}_\n"
+                msg += f"💬 <b>سبب الدخول (AI):</b> <i>{ai_exp}</i>\n"
 
-            # 3. المتابعة الحية (من البوت الثاني - بعد 60 ثانية من فتح الصفقة)
             analysis = self.db.get_latest_open_analysis(t.get('id', 0))
             if analysis:
                 profit = analysis.get('profit_pct', 0)
-                rec = analysis.get('recommendation', 'HOLD')
+                rec = str(analysis.get('recommendation', 'HOLD'))
                 stars = '⭐' * min(5, int(analysis.get('target_progress', 0) / 20))
-                msg += f"\n📈 **المتابعة الحية:**\n"
+                msg += f"\n📈 <b>المتابعة الحية:</b>\n"
                 msg += f"الربح الحالي: {profit:+.2f}% {stars}\n"
-                msg += f"قرار الذكاء الاصطناعي الآن: **{rec}** (ثقة: {analysis.get('ai_confidence', 0):.0f}%)\n"
+                msg += f"قرار الذكاء الاصطناعي الآن: <b>{rec}</b> (ثقة: {analysis.get('ai_confidence', 0):.0f}%)\n"
             else:
-                msg += f"\n⏳ _جاري جمع بيانات الحيتان والسيولة للمتابعة الحية..._\n"
+                msg += f"\n⏳ <i>جاري جمع بيانات الحيتان والسيولة للمتابعة الحية...</i>\n"
 
             msg += "\n" + "─"*25 + "\n\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
+            
+        await update.message.reply_text(msg, parse_mode='HTML')
 
     # =====================================================================
 
@@ -1488,6 +1486,11 @@ class MonitorLoop:
         target_progress = max(0, min(100, target_progress))
 
         ohlcv = market.get('ohlcv', [])
+        # 🔴 أضف هذا السطر لحماية البوت من الانهيار إذا لم ترجع الشموع
+        if not ohlcv or len(ohlcv) < 5:
+            logger.warning(f"No sufficient OHLCV data for {symbol}, skipping analysis.")
+            return
+
         trend_strength = self.analytics.trend_strength(ohlcv)
         momentum_score = self.analytics.momentum_score(ohlcv)
         funding_rate = self.analytics.funding_rate(symbol)
