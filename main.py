@@ -3,8 +3,7 @@
 ╔══════════════════════════════════════════════════════════════╗
 ║     APEX MONITOR BOT — Telegram AI Monitor v4.0            ║
 ║  Architecture: Monitor & Analysis Only (No Execution)      ║
-║  Enhanced with: Market Structure, Order Flow, Liquidity,   ║
-║  Whale Detection, Probability Engine, Binance Fallback     ║
+║  No local trades DB, reads from APEX API only             ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -85,14 +84,14 @@ except Exception as e:
 TELEGRAM_TOKEN = "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco"
 ADMIN_CHAT_ID = 6033203084
 
-# 🔹 التعديل 1: تفعيل API وتعيين رابط البوت الأول
+# 🔹 تفعيل API وتعيين رابط البوت الأول
 USE_API_INSTEAD_OF_DB = True
-APEX_API_URL = "https://binancetrading-production.up.railway.app"   # <-- تم التحديث بالرابط الجديد
+APEX_API_URL = "https://binancetrading-production.up.railway.app"   # <-- رابط البوت الأول
 
 # 🔹 تعطيل Binance Fallback نهائياً
 USE_BINANCE_FALLBACK = False
 
-MAIN_DB_PATH = "apex_aggressive_v3.db"   # لن نستخدمه للقراءة، نحتفظ به فقط للتوافق
+# لا نستخدم SQLite للصفقات، فقط للتحليلات الخاصة بالبوت الثاني (اختياري)
 MONITOR_DB_PATH = "monitor.db"
 
 # 🔹 لم نعد بحاجة لمفاتيح Binance في البوت الثاني
@@ -166,18 +165,18 @@ circuit_breaker = CircuitBreaker(
 )
 
 # =============================================================================
-# 🗄️ DATABASE (مع دعم API فقط، لا SQLite للقراءة)
+# 🗄️ DATABASE (فقط للتحليلات الخاصة بالبوت الثاني، لا صفقات)
 # =============================================================================
 
 class MonitorDB:
-    def __init__(self, main_db_path, monitor_db_path):
-        # لم نعد نستخدم main_db_path للقراءة، نحتفظ به فقط إذا احتجنا للتوافق
+    def __init__(self, monitor_db_path):
         self.monitor_conn = sqlite3.connect(monitor_db_path, check_same_thread=False)
         self.lock = threading.Lock()
         self._init_tables()
 
     def _init_tables(self):
         with self.lock:
+            # جداول التحليل فقط، لا جداول للصفقات
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS open_analysis (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,7 +315,7 @@ class MonitorDB:
             """)
             self.monitor_conn.commit()
 
-    # ---- قراءة الصفقات المفتوحة من API فقط ----
+    # ---- قراءة الصفقات المفتوحة من API فقط (لا SQLite) ----
     @circuit_breaker
     def get_open_trades(self) -> List[Dict[str, Any]]:
         """جلب الصفقات المفتوحة من البوت الأول عبر API"""
@@ -344,7 +343,6 @@ class MonitorDB:
             resp = requests.get(f"{APEX_API_URL}/health", timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
-                # نضمن وجود حقول أساسية
                 if 'performance' in data:
                     return data['performance']
                 else:
@@ -356,7 +354,7 @@ class MonitorDB:
             logger.error(f"Health API error: {e}")
             return {}
 
-    # ---- باقي دوال التخزين المحلي (للتحليلات) كما هي ----
+    # ---- باقي دوال التخزين المحلي (للتحليلات الخاصة بالبوت الثاني) ----
     def save_open_analysis(self, data: Dict[str, Any]):
         with self.lock:
             self.monitor_conn.execute("""
@@ -1223,7 +1221,7 @@ class TelegramBot:
             await update.message.reply_text(f"خطأ في جلب التحليل: {e}")
 
     # =====================================================================
-    # 🔹 الدالة المعدلة positions – تعرض البيانات الأساسية من البوت الأول
+    # 🔹 الدالة المعدلة positions – تعرض البيانات مباشرة من API
     # =====================================================================
     async def positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         trades = self.db.get_open_trades()
@@ -1326,7 +1324,6 @@ class TelegramBot:
         msg += f"عدد الصفقات الرابحة: {stats.get('wins', 0)}\n"
         msg += f"نسبة النجاح: {stats.get('winrate', 0):.1f}%\n"
         msg += f"إجمالي الربح: {stats.get('total_pnl', 0):.2f} USDT\n"
-        # يمكن إضافة المزيد من الحقول حسب ما يوفره الـ API
         await update.message.reply_text(msg, parse_mode='Markdown')
 
     async def lessons(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1631,24 +1628,24 @@ def main():
     )
     global logger
     logger = logging.getLogger("MONITOR")
-    logger.info("🚀 Starting APEX Monitor Bot v4.0")
+    logger.info("🚀 Starting APEX Monitor Bot v4.0 (Lightweight)")
     logger.info("📊 Enhanced with: Market Structure, Liquidity Analysis, Order Flow, Whale Detection, Probability Engine")
     logger.info("📰 News API: ee6adc6bb00849d5bb0b1a29e62d5ed4")
     logger.info("🤖 AI Models: Mistral + GPT-OSS-120b")
-    logger.info("🔗 Reading open trades from APEX API only (no Binance, no SQLite fallback)")
+    logger.info("🔗 Reading open trades from APEX API only (no local trades DB)")
     logger.info(f"📡 APEX API URL: {APEX_API_URL}")
 
     deployment_ip = show_ip_on_startup()
     logger.info(f"📌 Add this IP to Binance Whitelist: {deployment_ip}")
 
-    # 🔹 لم نعد نستخدم أي exchange بمفاتيح، فقط public للتحليلات
+    # كائن exchange عام للتحليلات (بدون مفاتيح)
     exchange_public = ccxt.binance({
         "enableRateLimit": True,
         "options": {"defaultType": "swap"}
     })
 
-    # قاعدة البيانات (بدون main_db_path للقراءة)
-    db = MonitorDB(MAIN_DB_PATH, MONITOR_DB_PATH)   # main_db_path لن يُستخدم
+    # قاعدة البيانات فقط للتحليلات الخاصة بالبوت الثاني
+    db = MonitorDB(MONITOR_DB_PATH)
 
     analytics = AdvancedAnalyticsEngine(exchange_public)
     analytics.db = db
