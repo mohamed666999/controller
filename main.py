@@ -83,7 +83,7 @@ except Exception as e:
 # =============================================================================
 
 TELEGRAM_TOKEN = "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco"
-ADMIN_CHAT_ID = "YOUR_CHAT_ID"
+ADMIN_CHAT_ID = 6033203084
 
 # 🔹 التعديل 1: تفعيل API وتعيين رابط البوت الأول
 USE_API_INSTEAD_OF_DB = True
