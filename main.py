@@ -85,15 +85,19 @@ except Exception as e:
 TELEGRAM_TOKEN = "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco"
 ADMIN_CHAT_ID = "YOUR_CHAT_ID"
 
-APEX_API_URL = "http://localhost:8080/api"
-USE_API_INSTEAD_OF_DB = False               # تم تعطيل API لتجنب خطأ localhost:8080
-USE_BINANCE_FALLBACK = True                 # ✅ تفعيل جلب المراكز من Binance مباشرة
+# 🔹 التعديل 1: تفعيل API وتعيين رابط البوت الأول (غيّر الرابط إلى رابط خدمتك)
+USE_API_INSTEAD_OF_DB = True
+APEX_API_URL = "https://apex-bot.up.railway.app"   # <-- غيّر هذا إلى رابط البوت الأول الفعلي
 
-MAIN_DB_PATH = "apex_aggressive_v3.db"
+# 🔹 تعطيل Binance Fallback نهائياً
+USE_BINANCE_FALLBACK = False
+
+MAIN_DB_PATH = "apex_aggressive_v3.db"   # لن نستخدمه للقراءة، نحتفظ به فقط للتوافق
 MONITOR_DB_PATH = "monitor.db"
 
-BINANCE_API_KEY = "6wsmpKnCpMpC3u8H6GuEbIarvCPtK2fyNmbl7GfEVq0dK2BDsC2fTsBrqxmFK5pB"
-BINANCE_SECRET = "szFKcEotkRAtp5LenUVCQ5gz3bG7MuydRKFNmhjyw6GLh8RIU68PGCKcDQZ5uw48"
+# 🔹 لم نعد بحاجة لمفاتيح Binance في البوت الثاني
+BINANCE_API_KEY = ""
+BINANCE_SECRET = ""
 NVIDIA_API_KEY = "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"
 NVIDIA_API_KEY_OSS = "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"
 
@@ -162,15 +166,14 @@ circuit_breaker = CircuitBreaker(
 )
 
 # =============================================================================
-# 🗄️ DATABASE (مع دعم Binance Fallback)
+# 🗄️ DATABASE (مع دعم API فقط، لا SQLite للقراءة)
 # =============================================================================
 
 class MonitorDB:
-    def __init__(self, main_db_path, monitor_db_path, exchange=None):
-        self.main_conn = sqlite3.connect(main_db_path, check_same_thread=False)
+    def __init__(self, main_db_path, monitor_db_path):
+        # لم نعد نستخدم main_db_path للقراءة، نحتفظ به فقط إذا احتجنا للتوافق
         self.monitor_conn = sqlite3.connect(monitor_db_path, check_same_thread=False)
         self.lock = threading.Lock()
-        self.exchange = exchange  # كائن ccxt مع مفاتيح لجلب المراكز
         self._init_tables()
 
     def _init_tables(self):
@@ -313,94 +316,47 @@ class MonitorDB:
             """)
             self.monitor_conn.commit()
 
-    # ---- جلب المراكز من Binance مباشرة (Futures) ----
-    def _fetch_positions_from_binance(self) -> List[Dict[str, Any]]:
-        """جلب المراكز المفتوحة من Binance Futures باستخدام CCXT"""
-        if not self.exchange:
-            logger.warning("Binance exchange not available for positions")
-            return None
-        try:
-            positions = self.exchange.fetch_positions()
-            if not positions:
-                return []
-            open_positions = []
-            for pos in positions:
-                contracts = float(pos.get('contracts', 0))
-                if contracts > 0:
-                    open_positions.append({
-                        'id': hash(pos['symbol'] + str(time.time())),
-                        'symbol': pos['symbol'],
-                        'side': 'LONG' if pos.get('side') == 'long' else 'SHORT',
-                        'entry_price': float(pos.get('entryPrice', 0)),
-                        'quantity': contracts,
-                        'sl_price': 0,
-                        'tp_price': 0,
-                        'confidence': 50,
-                        'entry_quality': 50,
-                        'regime': 'UNKNOWN',
-                        'reason': 'From Binance',
-                        'timestamp': datetime.now(timezone.utc).isoformat(),
-                        'slot_used': 0,
-                        'leverage_used': int(pos.get('leverage', 1))
-                    })
-            return open_positions
-        except Exception as e:
-            logger.error(f"Binance positions error: {e}")
-            return None
-
-    # ---- قراءة الصفقات المفتوحة مع Fallback ----
+    # ---- قراءة الصفقات المفتوحة من API فقط ----
     @circuit_breaker
     def get_open_trades(self) -> List[Dict[str, Any]]:
-        # 1. إذا كان مفعلاً، حاول جلب المراكز من Binance مباشرة
-        if USE_BINANCE_FALLBACK and self.exchange:
-            binance_positions = self._fetch_positions_from_binance()
-            if binance_positions is not None:
-                if len(binance_positions) > 0:
-                    logger.info(f"Fetched {len(binance_positions)} positions from Binance")
-                    return binance_positions
+        """جلب الصفقات المفتوحة من البوت الأول عبر API"""
+        try:
+            resp = requests.get(f"{APEX_API_URL}/positions", timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list):
+                    logger.info(f"Fetched {len(data)} open trades from API")
+                    return data
                 else:
-                    logger.info("No open positions in Binance")
-                    # إذا لم توجد مراكز، نستمر للبحث في SQLite (قد يكون هناك صفقات قديمة)
-                    # لكننا نفضل العودة بقائمة فارغة بدلاً من SQLite إذا كانت Binance متاحة وتقول لا توجد مراكز
-                    # لأن Binance هي المصدر الأكثر دقة للحالة الحالية.
-                    # لكن للتوافق، سنستمر إلى SQLite إذا أردنا الاحتفاظ بالصفقات القديمة.
-                    # سنعود بقائمة فارغة إذا أردنا أن تكون Binance هي المصدر الوحيد.
-                    # هنا سنرجع قائمة فارغة إذا كانت Binance متصلة بنجاح ولا توجد مراكز.
-                    # لكن قد نرغب في الاحتفاظ بصفقات SQLite القديمة، لذلك سنواصل.
-                    # سنجعل السلوك: إذا كان هناك مراكز في Binance نستخدمها، وإلا ننتقل إلى SQLite.
-                    # ولكن إذا كانت Binance تعيد [] (لا مراكز) فهذا يعني أنه لا توجد صفقات مفتوحة حالياً،
-                    # ومن الأفضل أن نعرض ذلك بدلاً من عرض صفقات SQLite القديمة التي قد تكون مغلقة بالفعل.
-                    # لذلك سنرجع [] إذا كانت Binance متاحة وليس بها مراكز.
-                    # ولكن قد نرغب في الاحتفاظ بالصفقات القديمة لأغراض المراقبة، لذا سنستخدم SQLite كنسخة احتياطية.
-                    # سنقوم بالتحقق: إذا كانت Binance متاحة وأرجعت []، نستخدم SQLite كخيار احتياطي (للصفقات القديمة).
-                    # لكن الأفضل أن نعتمد على Binance فقط للصفقات المفتوحة الحالية.
-                    # سأقوم بإرجاع [] إذا كانت Binance متاحة وأرجعت []، لأن هذا يعكس الواقع الحالي.
+                    logger.warning(f"API returned unexpected data: {type(data)}")
                     return []
-            # إذا فشلت Binance أو عادت None، ننتقل للخطوات التالية
+            else:
+                logger.warning(f"API returned status {resp.status_code}")
+                return []
+        except Exception as e:
+            logger.error(f"API error in get_open_trades: {e}")
+            return []
 
-        # 2. محاولة API (معطل حالياً)
-        if USE_API_INSTEAD_OF_DB:
-            try:
-                resp = requests.get(f"{APEX_API_URL}/open_trades", timeout=10)
-                if resp.status_code == 200:
-                    return resp.json()
-            except Exception as e:
-                logger.warning(f"API fetch failed: {e}")
+    # ---- جلب الإحصائيات من API ----
+    def get_statistics(self) -> Dict[str, Any]:
+        """جلب الإحصائيات من البوت الأول عبر /health"""
+        try:
+            resp = requests.get(f"{APEX_API_URL}/health", timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                # نضمن وجود حقول أساسية
+                if 'performance' in data:
+                    return data['performance']
+                else:
+                    return data
+            else:
+                logger.warning(f"Health API returned {resp.status_code}")
+                return {}
+        except Exception as e:
+            logger.error(f"Health API error: {e}")
+            return {}
 
-        # 3. Fallback إلى SQLite
-        with self.lock:
-            cursor = self.main_conn.execute(
-                "SELECT id, symbol, side, entry_price, quantity, sl_price, tp_price, "
-                "confidence, entry_quality, regime, reason, timestamp, slot_used, leverage_used "
-                "FROM trades WHERE status='OPEN'"
-            )
-            cols = [desc[0] for desc in cursor.description]
-            trades = [dict(zip(cols, row)) for row in cursor.fetchall()]
-            if trades:
-                logger.info(f"Fetched {len(trades)} open trades from SQLite")
-            return trades
-
-    # ---- باقي الدوال (save_open_analysis, save_closed_analysis, ...) كما هي ----
+    # ---- باقي دوال التخزين المحلي (للتحليلات) كما هي ----
     def save_open_analysis(self, data: Dict[str, Any]):
         with self.lock:
             self.monitor_conn.execute("""
@@ -595,7 +551,7 @@ class MonitorDB:
         return {"precision": precision, "recall": recall, "f1": f1}
 
 # =============================================================================
-# 📊 ADVANCED ANALYTICS ENGINE (نفس الكود السابق)
+# 📊 ADVANCED ANALYTICS ENGINE (نفس الكود السابق، يستخدم exchange_public)
 # =============================================================================
 
 class AdvancedAnalyticsEngine:
@@ -1328,19 +1284,17 @@ class TelegramBot:
         await update.message.reply_text(msg, parse_mode='Markdown')
 
     async def statistics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        perf = self.db.get_all_performance()
-        if not perf:
-            await update.message.reply_text("لا توجد إحصائيات كافية بعد.")
+        # استخدام الدالة الجديدة get_statistics() التي تجلب من API
+        stats = self.db.get_statistics()
+        if not stats:
+            await update.message.reply_text("لا توجد إحصائيات متاحة حالياً.")
             return
-        msg = "📈 **إحصائيات أداء الأنظمة**\n\n"
-        for p in perf:
-            msg += f"**{p['system_name']}**\n"
-            msg += f"  عدد الصفقات: {p['total_trades']}\n"
-            msg += f"  نسبة النجاح: {p['winrate']:.1f}%\n"
-            msg += f"  متوسط الربح: {p['avg_profit']:.2f}%\n"
-            msg += f"  متوسط RR: {p.get('avg_rr', 0):.2f}\n"
-            msg += f"  متوسط وقت الاحتفاظ: {p.get('avg_hold_time', 0):.0f} دقيقة\n"
-            msg += f"  إجمالي الربح: {p['total_pnl']:.2f}%\n\n"
+        msg = "📈 **إحصائيات الأداء**\n\n"
+        msg += f"عدد الصفقات الكلي: {stats.get('total', 0)}\n"
+        msg += f"عدد الصفقات الرابحة: {stats.get('wins', 0)}\n"
+        msg += f"نسبة النجاح: {stats.get('winrate', 0):.1f}%\n"
+        msg += f"إجمالي الربح: {stats.get('total_pnl', 0):.2f} USDT\n"
+        # يمكن إضافة المزيد من الحقول حسب ما يوفره الـ API
         await update.message.reply_text(msg, parse_mode='Markdown')
 
     async def lessons(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1649,28 +1603,19 @@ def main():
     logger.info("📊 Enhanced with: Market Structure, Liquidity Analysis, Order Flow, Whale Detection, Probability Engine")
     logger.info("📰 News API: ee6adc6bb00849d5bb0b1a29e62d5ed4")
     logger.info("🤖 AI Models: Mistral + GPT-OSS-120b")
-    logger.info("🔑 Binance API Key: 6wsmpKnCpMpC3u8H6GuEbIarvCPtK2fyNmbl7GfEVq0dK2BDsC2fTsBrqxmFK5pB")
-    logger.info("🔄 Binance Fallback: ENABLED (will fetch positions directly from Binance)")
+    logger.info("🔗 Reading open trades from APEX API only (no Binance, no SQLite fallback)")
 
     deployment_ip = show_ip_on_startup()
     logger.info(f"📌 Add this IP to Binance Whitelist: {deployment_ip}")
 
-    # إنشاء كائن exchange مع مفاتيح لجلب المراكز (Futures)
-    exchange = ccxt.binance({
-        'apiKey': BINANCE_API_KEY,
-        'secret': BINANCE_SECRET,
-        'enableRateLimit': True,
-        'options': {'defaultType': 'swap'}  # Futures
-    })
-
-    # كائن public للبيانات العامة (بدون مفاتيح)
+    # 🔹 لم نعد نستخدم أي exchange بمفاتيح، فقط public للتحليلات
     exchange_public = ccxt.binance({
         "enableRateLimit": True,
         "options": {"defaultType": "swap"}
     })
 
-    # إنشاء قاعدة البيانات مع تمرير exchange
-    db = MonitorDB(MAIN_DB_PATH, MONITOR_DB_PATH, exchange=exchange)
+    # قاعدة البيانات (بدون main_db_path للقراءة)
+    db = MonitorDB(MAIN_DB_PATH, MONITOR_DB_PATH)   # main_db_path لن يُستخدم
 
     analytics = AdvancedAnalyticsEngine(exchange_public)
     analytics.db = db
