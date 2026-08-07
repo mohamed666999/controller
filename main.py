@@ -32,6 +32,56 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # =============================================================================
+# 🌐 عرض IP فور بدء التشغيل (لـ Railway Logs) — IP DEPLOYMENT DETECTION
+# =============================================================================
+
+def get_public_ip():
+    """جلب الـ IP العام لـ Railway Deployment"""
+    try:
+        # محاولة من عدة خدمات
+        urls = [
+            "https://api.ipify.org",
+            "https://ifconfig.me/ip",
+            "https://icanhazip.com",
+            "https://checkip.amazonaws.com"
+        ]
+        for url in urls:
+            try:
+                resp = requests.get(url, timeout=5)
+                if resp.status_code == 200:
+                    ip = resp.text.strip()
+                    if ip and len(ip) > 7:
+                        return ip
+            except:
+                continue
+        return "UNKNOWN"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+# عرض IP فور بدء التشغيل
+print("=" * 70)
+print("🚀 RAILWAY DEPLOYMENT IP DETECTION")
+print("=" * 70)
+DEPLOYMENT_IP = get_public_ip()
+print(f"📌 PUBLIC IP: {DEPLOYMENT_IP}")
+print("=" * 70)
+print("⚠️  ADD THIS IP TO BINANCE API WHITELIST!")
+print("🔗 https://www.binance.com/en/support/faq/how-to-configure-ip-access-restrictions-on-binance-api-360041267251")
+print("=" * 70)
+
+# حفظ IP في ملف
+try:
+    with open("deployment_ip.txt", "w") as f:
+        f.write(f"DEPLOYMENT_IP={DEPLOYMENT_IP}\n")
+        f.write(f"TIMESTAMP={datetime.now().isoformat()}\n")
+        f.write("BINANCE_API_KEY=6wsmpKnCpMpC3u8H6GuEbIarvCPtK2fyNmbl7GfEVq0dK2BDsC2fTsBrqxmFK5pB\n")
+        f.write("NEWS_API_KEY=ee6adc6bb00849d5bb0b1a29e62d5ed4\n")
+        f.write(f"TELEGRAM_BOT=8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco\n")
+    print("✅ IP saved to deployment_ip.txt")
+except Exception as e:
+    print(f"⚠️ Could not save IP file: {e}")
+
+# =============================================================================
 # 🔧 CONFIG (جميع الإعدادات في مكان واحد)
 # =============================================================================
 
@@ -121,56 +171,6 @@ circuit_breaker = CircuitBreaker(
     failure_threshold=CIRCUIT_BREAKER_FAILURE_THRESHOLD,
     timeout=CIRCUIT_BREAKER_TIMEOUT
 )
-
-# =============================================================================
-# 🌐 IP DEPLOYMENT DETECTION (لإضافة الـ IP إلى Whitelist)
-# =============================================================================
-
-def get_public_ip() -> str:
-    """جلب الـ IP العام للـ Railway Deployment"""
-    try:
-        # محاولة جلب IP من عدة خدمات
-        urls = [
-            "https://api.ipify.org",
-            "https://ifconfig.me/ip",
-            "https://icanhazip.com"
-        ]
-        for url in urls:
-            try:
-                resp = requests.get(url, timeout=5)
-                if resp.status_code == 200:
-                    ip = resp.text.strip()
-                    if ip and len(ip) > 7:
-                        logger.info(f"✅ Public IP detected: {ip}")
-                        return ip
-            except:
-                continue
-        return "UNKNOWN"
-    except Exception as e:
-        logger.error(f"Failed to get public IP: {e}")
-        return "UNKNOWN"
-
-def show_deployment_ip():
-    """عرض IP التطبيق وإرشادات الـ Whitelist"""
-    ip = get_public_ip()
-    logger.critical("=" * 70)
-    logger.critical(f"  🚀 DEPLOYMENT PUBLIC IP:  {ip}")
-    logger.critical("=" * 70)
-    logger.critical("  ⚠️  IMPORTANT: Add this IP to Binance API Whitelist!")
-    logger.critical("  📍  Binance API Management -> IP Whitelist -> Add IP")
-    logger.critical("=" * 70)
-    logger.critical("  🔗  NewsAPI Key: ee6adc6bb00849d5bb0b1a29e62d5ed4")
-    logger.critical("  📰  News Source: https://newsapi.org/register/success")
-    logger.critical("=" * 70)
-    
-    # حفظ IP في ملف لاستخدامه لاحقاً
-    with open("deployment_ip.txt", "w") as f:
-        f.write(f"DEPLOYMENT_IP={ip}\n")
-        f.write(f"TIMESTAMP={datetime.now(timezone.utc).isoformat()}\n")
-        f.write(f"BINANCE_API_KEY={BINANCE_API_KEY[:10]}...\n")
-        f.write(f"NEWS_API_KEY={NEWS_API_KEY}\n")
-    
-    return ip
 
 # =============================================================================
 # 🗄️ DATABASE (فئة MonitorDB مع جداول إضافية)
@@ -311,7 +311,7 @@ class MonitorDB:
                     timestamp TEXT
                 );
             """)
-            # جدول لتحليل السوق المتقدم (Market Structure)
+            # 🆕 جدول لتحليل السوق المتقدم (Market Structure)
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS market_analysis (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1671,7 +1671,6 @@ class MonitorLoop:
         msg += f"احتمال TP: {prob_tp:.0f}% | احتمال SL: {prob_sl:.0f}%\n"
         msg += f"السبب: {reason}\n"
         msg += f"الثقة: {confidence:.0f}%"
-        # إرسال عبر التيليجرام
 
     def _analyze_closed_trades(self):
         pass
@@ -1682,6 +1681,16 @@ class MonitorLoop:
 # =============================================================================
 # 🚀 MAIN
 # =============================================================================
+
+def show_ip_on_startup():
+    """عرض IP عند بدء التشغيل"""
+    ip = get_public_ip()
+    print("\n" + "=" * 70)
+    print(f"🌐 CURRENT PUBLIC IP: {ip}")
+    print("=" * 70)
+    print("📌 Copy this IP and add to Binance Whitelist")
+    print("=" * 70 + "\n")
+    return ip
 
 def main():
     logging.basicConfig(
@@ -1698,7 +1707,8 @@ def main():
     logger.info("🔑 Binance API Key: 6wsmpKnCpMpC3u8H6GuEbIarvCPtK2fyNmbl7GfEVq0dK2BDsC2fTsBrqxmFK5pB")
 
     # عرض IP التطبيق للإضافة في Whitelist
-    deployment_ip = show_deployment_ip()
+    deployment_ip = show_ip_on_startup()
+    logger.info(f"📌 Add this IP to Binance Whitelist: {deployment_ip}")
 
     db = MonitorDB(MAIN_DB_PATH, MONITOR_DB_PATH)
 
@@ -1721,7 +1731,6 @@ def main():
     telegram_thread.start()
 
     logger.info("Monitor is running. Press Ctrl+C to stop.")
-    logger.info(f"📌 Add this IP to Binance Whitelist: {deployment_ip}")
     try:
         while True:
             time.sleep(1)
@@ -1730,4 +1739,6 @@ def main():
         monitor.stop()
 
 if __name__ == "__main__":
+    # عرض IP فور بدء التشغيل
+    show_ip_on_startup()
     main()
