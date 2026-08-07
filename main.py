@@ -85,9 +85,9 @@ except Exception as e:
 TELEGRAM_TOKEN = "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco"
 ADMIN_CHAT_ID = "YOUR_CHAT_ID"
 
-# 🔹 التعديل 1: تفعيل API وتعيين رابط البوت الأول (غيّر الرابط إلى رابط خدمتك)
+# 🔹 التعديل 1: تفعيل API وتعيين رابط البوت الأول
 USE_API_INSTEAD_OF_DB = True
-APEX_API_URL = "https://apex-bot.up.railway.app"   # <-- غيّر هذا إلى رابط البوت الأول الفعلي
+APEX_API_URL = "https://binancetrading-production.up.railway.app"   # <-- تم التحديث بالرابط الجديد
 
 # 🔹 تعطيل Binance Fallback نهائياً
 USE_BINANCE_FALLBACK = False
@@ -1604,6 +1604,7 @@ def main():
     logger.info("📰 News API: ee6adc6bb00849d5bb0b1a29e62d5ed4")
     logger.info("🤖 AI Models: Mistral + GPT-OSS-120b")
     logger.info("🔗 Reading open trades from APEX API only (no Binance, no SQLite fallback)")
+    logger.info(f"📡 APEX API URL: {APEX_API_URL}")
 
     deployment_ip = show_ip_on_startup()
     logger.info(f"📌 Add this IP to Binance Whitelist: {deployment_ip}")
