@@ -1246,11 +1246,16 @@ class TelegramBot:
             
             direction_emoji = '🟢 LONG' if side == 'LONG' else '🔴 SHORT'
 
-            msg += f"• <b>{symbol}</b>\n"
+                        # استخراج معرف الصفقة
+            trade_id = t.get('id', '?')
+
+            # إضافة المعرف (ID) بجانب اسم العملة
+            msg += f"• <b>{symbol}</b> (ID: <code>{trade_id}</code>)\n"
             msg += f"الاتجاه: {direction_emoji} | الرافعة: x{leverage} (Slot {slot})\n"
             msg += f"الدخول: <code>{entry_price}</code>\n"
             msg += f"الوقف: <code>{sl_price}</code> | الهدف: <code>{tp_price}</code>\n"
             msg += f"قوة الدخول: {score:.1f}/100 | السوق: {regime}\n"
+
             
             if ai_exp:
                 msg += f"💬 <b>سبب الدخول (AI):</b> <i>{ai_exp}</i>\n"
