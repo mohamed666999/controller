@@ -3,8 +3,8 @@
 ╔══════════════════════════════════════════════════════════════╗
 ║     APEX MONITOR BOT — Telegram AI Monitor v4.0            ║
 ║  Architecture: Monitor & Analysis Only (No Execution)      ║
-║  Enhanced with: Advanced Market Structure, Order Flow,     ║
-║  Liquidity Analysis, Probability Engine, Whale Activity    ║
+║  Enhanced with: Market Structure, Order Flow, Liquidity,   ║
+║  Whale Detection, Probability Engine, Binance Fallback     ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -38,7 +38,6 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 def get_public_ip():
     """جلب الـ IP العام لـ Railway Deployment"""
     try:
-        # محاولة من عدة خدمات
         urls = [
             "https://api.ipify.org",
             "https://ifconfig.me/ip",
@@ -58,7 +57,6 @@ def get_public_ip():
     except Exception as e:
         return f"ERROR: {e}"
 
-# عرض IP فور بدء التشغيل
 print("=" * 70)
 print("🚀 RAILWAY DEPLOYMENT IP DETECTION")
 print("=" * 70)
@@ -69,7 +67,6 @@ print("⚠️  ADD THIS IP TO BINANCE API WHITELIST!")
 print("🔗 https://www.binance.com/en/support/faq/how-to-configure-ip-access-restrictions-on-binance-api-360041267251")
 print("=" * 70)
 
-# حفظ IP في ملف
 try:
     with open("deployment_ip.txt", "w") as f:
         f.write(f"DEPLOYMENT_IP={DEPLOYMENT_IP}\n")
@@ -82,55 +79,47 @@ except Exception as e:
     print(f"⚠️ Could not save IP file: {e}")
 
 # =============================================================================
-# 🔧 CONFIG (جميع الإعدادات في مكان واحد)
+# 🔧 CONFIG
 # =============================================================================
 
-# -------------------- تيليجرام --------------------
-TELEGRAM_TOKEN = "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco"          # توكن البوت من BotFather
-ADMIN_CHAT_ID = "YOUR_CHAT_ID"            # معرف الدردشة لتلقي التنبيهات
+TELEGRAM_TOKEN = "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco"
+ADMIN_CHAT_ID = "YOUR_CHAT_ID"
 
-# -------------------- API Integration (بدلاً من SQLite المباشر) --------------------
-APEX_API_URL = "http://localhost:8080/api"  # عنوان API البوت الرئيسي
-USE_API_INSTEAD_OF_DB = False               # ✅ تم تعطيل API لتجنب خطأ localhost:8080
+APEX_API_URL = "http://localhost:8080/api"
+USE_API_INSTEAD_OF_DB = False               # تم تعطيل API لتجنب خطأ localhost:8080
+USE_BINANCE_FALLBACK = True                 # ✅ تفعيل جلب المراكز من Binance مباشرة
 
-# -------------------- قواعد البيانات --------------------
-MAIN_DB_PATH = "apex_aggressive_v3.db"    # قاعدة بيانات البوت الأساسي (للاحتياط)
-MONITOR_DB_PATH = "monitor.db"             # قاعدة بيانات بوت المراقبة
+MAIN_DB_PATH = "apex_aggressive_v3.db"
+MONITOR_DB_PATH = "monitor.db"
 
-# -------------------- API Keys --------------------
 BINANCE_API_KEY = "6wsmpKnCpMpC3u8H6GuEbIarvCPtK2fyNmbl7GfEVq0dK2BDsC2fTsBrqxmFK5pB"
 BINANCE_SECRET = "szFKcEotkRAtp5LenUVCQ5gz3bG7MuydRKFNmhjyw6GLh8RIU68PGCKcDQZ5uw48"
 NVIDIA_API_KEY = "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"
 NVIDIA_API_KEY_OSS = "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"
 
-# -------------------- إعدادات المراقبة --------------------
-MONITOR_INTERVAL = 60                 # ثانية (كل دقيقة)
-ANALYSIS_DELAY_HOURS = 24             # ساعات لإعادة تحليل الصفقة المنتهية
+MONITOR_INTERVAL = 60
+ANALYSIS_DELAY_HOURS = 24
 MAX_OPEN_TRADES_TO_MONITOR = 20
 AI_MODEL = "mistralai/mistral-medium-3.5-128b"
-AI_MODEL_OSS = "openai/gpt-oss-120b"   # تم التحديث إلى GPT-OSS-120b
-USE_AI_VETO = False                   # لا نستخدم الفيتو هنا، فقط توصيات
-DUAL_AI_ENABLED = True                # تفعيل نموذجين للذكاء الاصطناعي
+AI_MODEL_OSS = "openai/gpt-oss-120b"
+USE_AI_VETO = False
+DUAL_AI_ENABLED = True
 
-# -------------------- مصادر الأخبار --------------------
-NEWS_API_KEY = "ee6adc6bb00849d5bb0b1a29e62d5ed4"     # من NewsAPI
+NEWS_API_KEY = "ee6adc6bb00849d5bb0b1a29e62d5ed4"
 NEWS_ENABLED = True
-NEWS_CACHE_TTL = 1800                 # 30 دقيقة
+NEWS_CACHE_TTL = 1800
 
-# -------------------- إعدادات التوصيات --------------------
-RECOMMENDATION_THRESHOLD = 0.65        # نسبة الثقة المطلوبة لإرسال توصية
+RECOMMENDATION_THRESHOLD = 0.65
 
-# -------------------- تحسينات الذكاء الاصطناعي --------------------
-AI_CACHE_TTL = 300                    # 5 دقائق (نقارن التغييرات)
-AI_MIN_PROFIT_CHANGE = 0.5            # تغير الربح بنسبة 0.5% لإعادة الاستدعاء
-AI_MIN_PRICE_CHANGE = 0.3             # تغير السعر بنسبة 0.3%
+AI_CACHE_TTL = 300
+AI_MIN_PROFIT_CHANGE = 0.5
+AI_MIN_PRICE_CHANGE = 0.3
 
-# -------------------- Circuit Breaker --------------------
 CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
 CIRCUIT_BREAKER_TIMEOUT = 60
 
 # =============================================================================
-# 🛡️ CIRCUIT BREAKER DECORATOR
+# 🛡️ CIRCUIT BREAKER
 # =============================================================================
 
 class CircuitBreaker:
@@ -139,7 +128,7 @@ class CircuitBreaker:
         self.timeout = timeout
         self.failures = 0
         self.last_failure = None
-        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self.state = "CLOSED"
 
     def __call__(self, func):
         @wraps(func)
@@ -173,19 +162,19 @@ circuit_breaker = CircuitBreaker(
 )
 
 # =============================================================================
-# 🗄️ DATABASE (فئة MonitorDB مع جداول إضافية)
+# 🗄️ DATABASE (مع دعم Binance Fallback)
 # =============================================================================
 
 class MonitorDB:
-    def __init__(self, main_db_path, monitor_db_path):
+    def __init__(self, main_db_path, monitor_db_path, exchange=None):
         self.main_conn = sqlite3.connect(main_db_path, check_same_thread=False)
         self.monitor_conn = sqlite3.connect(monitor_db_path, check_same_thread=False)
         self.lock = threading.Lock()
+        self.exchange = exchange  # كائن ccxt مع مفاتيح لجلب المراكز
         self._init_tables()
 
     def _init_tables(self):
         with self.lock:
-            # جدول لتخزين تحليلات الصفقات المفتوحة لحظياً (سجل المراقبة)
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS open_analysis (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,7 +207,6 @@ class MonitorDB:
                     timestamp TEXT
                 );
             """)
-            # جدول لتخزين تحليل الصفقات المنتهية (بعد الإغلاق)
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS closed_analysis (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -243,7 +231,6 @@ class MonitorDB:
                     timestamp TEXT
                 );
             """)
-            # جدول لأداء الأنظمة (APEX, AI, ISS, External) مع مقاييس متقدمة
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS system_performance (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,7 +250,6 @@ class MonitorDB:
                     last_updated TEXT
                 );
             """)
-            # جدول الدروس المستفادة (Lessons Database)
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS lessons (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -282,7 +268,6 @@ class MonitorDB:
                     timestamp TEXT
                 );
             """)
-            # جدول الصفقات المرفوضة (لم يتم فتحها)
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS rejected_trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -296,7 +281,6 @@ class MonitorDB:
                     timestamp TEXT
                 );
             """)
-            # جدول Confusion Matrix لتقييم التوصيات
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS confusion_matrix (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -311,7 +295,6 @@ class MonitorDB:
                     timestamp TEXT
                 );
             """)
-            # 🆕 جدول لتحليل السوق المتقدم (Market Structure)
             self.monitor_conn.execute("""
                 CREATE TABLE IF NOT EXISTS market_analysis (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -330,17 +313,81 @@ class MonitorDB:
             """)
             self.monitor_conn.commit()
 
-    # ---- قراءة الصفقات المفتوحة مع Retry و Circuit Breaker ----
+    # ---- جلب المراكز من Binance مباشرة (Futures) ----
+    def _fetch_positions_from_binance(self) -> List[Dict[str, Any]]:
+        """جلب المراكز المفتوحة من Binance Futures باستخدام CCXT"""
+        if not self.exchange:
+            logger.warning("Binance exchange not available for positions")
+            return None
+        try:
+            positions = self.exchange.fetch_positions()
+            if not positions:
+                return []
+            open_positions = []
+            for pos in positions:
+                contracts = float(pos.get('contracts', 0))
+                if contracts > 0:
+                    open_positions.append({
+                        'id': hash(pos['symbol'] + str(time.time())),
+                        'symbol': pos['symbol'],
+                        'side': 'LONG' if pos.get('side') == 'long' else 'SHORT',
+                        'entry_price': float(pos.get('entryPrice', 0)),
+                        'quantity': contracts,
+                        'sl_price': 0,
+                        'tp_price': 0,
+                        'confidence': 50,
+                        'entry_quality': 50,
+                        'regime': 'UNKNOWN',
+                        'reason': 'From Binance',
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'slot_used': 0,
+                        'leverage_used': int(pos.get('leverage', 1))
+                    })
+            return open_positions
+        except Exception as e:
+            logger.error(f"Binance positions error: {e}")
+            return None
+
+    # ---- قراءة الصفقات المفتوحة مع Fallback ----
     @circuit_breaker
     def get_open_trades(self) -> List[Dict[str, Any]]:
+        # 1. إذا كان مفعلاً، حاول جلب المراكز من Binance مباشرة
+        if USE_BINANCE_FALLBACK and self.exchange:
+            binance_positions = self._fetch_positions_from_binance()
+            if binance_positions is not None:
+                if len(binance_positions) > 0:
+                    logger.info(f"Fetched {len(binance_positions)} positions from Binance")
+                    return binance_positions
+                else:
+                    logger.info("No open positions in Binance")
+                    # إذا لم توجد مراكز، نستمر للبحث في SQLite (قد يكون هناك صفقات قديمة)
+                    # لكننا نفضل العودة بقائمة فارغة بدلاً من SQLite إذا كانت Binance متاحة وتقول لا توجد مراكز
+                    # لأن Binance هي المصدر الأكثر دقة للحالة الحالية.
+                    # لكن للتوافق، سنستمر إلى SQLite إذا أردنا الاحتفاظ بالصفقات القديمة.
+                    # سنعود بقائمة فارغة إذا أردنا أن تكون Binance هي المصدر الوحيد.
+                    # هنا سنرجع قائمة فارغة إذا كانت Binance متصلة بنجاح ولا توجد مراكز.
+                    # لكن قد نرغب في الاحتفاظ بصفقات SQLite القديمة، لذلك سنواصل.
+                    # سنجعل السلوك: إذا كان هناك مراكز في Binance نستخدمها، وإلا ننتقل إلى SQLite.
+                    # ولكن إذا كانت Binance تعيد [] (لا مراكز) فهذا يعني أنه لا توجد صفقات مفتوحة حالياً،
+                    # ومن الأفضل أن نعرض ذلك بدلاً من عرض صفقات SQLite القديمة التي قد تكون مغلقة بالفعل.
+                    # لذلك سنرجع [] إذا كانت Binance متاحة وليس بها مراكز.
+                    # ولكن قد نرغب في الاحتفاظ بالصفقات القديمة لأغراض المراقبة، لذا سنستخدم SQLite كنسخة احتياطية.
+                    # سنقوم بالتحقق: إذا كانت Binance متاحة وأرجعت []، نستخدم SQLite كخيار احتياطي (للصفقات القديمة).
+                    # لكن الأفضل أن نعتمد على Binance فقط للصفقات المفتوحة الحالية.
+                    # سأقوم بإرجاع [] إذا كانت Binance متاحة وأرجعت []، لأن هذا يعكس الواقع الحالي.
+                    return []
+            # إذا فشلت Binance أو عادت None، ننتقل للخطوات التالية
+
+        # 2. محاولة API (معطل حالياً)
         if USE_API_INSTEAD_OF_DB:
             try:
                 resp = requests.get(f"{APEX_API_URL}/open_trades", timeout=10)
                 if resp.status_code == 200:
                     return resp.json()
             except Exception as e:
-                logger.warning(f"API fetch failed: {e}, falling back to SQLite")
-        # Fallback إلى SQLite المباشر
+                logger.warning(f"API fetch failed: {e}")
+
+        # 3. Fallback إلى SQLite
         with self.lock:
             cursor = self.main_conn.execute(
                 "SELECT id, symbol, side, entry_price, quantity, sl_price, tp_price, "
@@ -348,9 +395,12 @@ class MonitorDB:
                 "FROM trades WHERE status='OPEN'"
             )
             cols = [desc[0] for desc in cursor.description]
-            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+            trades = [dict(zip(cols, row)) for row in cursor.fetchall()]
+            if trades:
+                logger.info(f"Fetched {len(trades)} open trades from SQLite")
+            return trades
 
-    # ---- حفظ تحليل الصفقة المفتوحة (موسع) ----
+    # ---- باقي الدوال (save_open_analysis, save_closed_analysis, ...) كما هي ----
     def save_open_analysis(self, data: Dict[str, Any]):
         with self.lock:
             self.monitor_conn.execute("""
@@ -386,7 +436,6 @@ class MonitorDB:
             ))
             self.monitor_conn.commit()
 
-    # ---- حفظ تحليل السوق المتقدم ----
     def save_market_analysis(self, data: Dict[str, Any]):
         with self.lock:
             self.monitor_conn.execute("""
@@ -406,7 +455,6 @@ class MonitorDB:
             ))
             self.monitor_conn.commit()
 
-    # ---- حفظ تحليل الصفقة المنتهية ----
     def save_closed_analysis(self, data: Dict[str, Any]):
         with self.lock:
             self.monitor_conn.execute("""
@@ -436,7 +484,6 @@ class MonitorDB:
             ))
             self.monitor_conn.commit()
 
-    # ---- تحديث أداء الأنظمة ----
     def update_system_performance(self, system_name: str, stats: Dict):
         with self.lock:
             self.monitor_conn.execute("""
@@ -464,7 +511,6 @@ class MonitorDB:
             ))
             self.monitor_conn.commit()
 
-    # ---- حفظ درس مستفاد ----
     def save_lesson(self, data: Dict[str, Any]):
         with self.lock:
             self.monitor_conn.execute("""
@@ -483,7 +529,6 @@ class MonitorDB:
             ))
             self.monitor_conn.commit()
 
-    # ---- حفظ صفقة مرفوضة ----
     def save_rejected_trade(self, data: Dict[str, Any]):
         with self.lock:
             self.monitor_conn.execute("""
@@ -499,7 +544,6 @@ class MonitorDB:
             ))
             self.monitor_conn.commit()
 
-    # ---- قراءة الأداء الكلي ----
     def get_all_performance(self) -> List[Dict]:
         with self.lock:
             cursor = self.monitor_conn.execute(
@@ -510,7 +554,6 @@ class MonitorDB:
             cols = [desc[0] for desc in cursor.description]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
-    # ---- قراءة آخر تحليلات الصفقات المفتوحة ----
     def get_latest_open_analysis(self, trade_id: int) -> Dict:
         with self.lock:
             cursor = self.monitor_conn.execute(
@@ -523,7 +566,6 @@ class MonitorDB:
                 return dict(zip(cols, row))
             return {}
 
-    # ---- قراءة الدروس المستفادة ----
     def get_lessons(self, limit=500) -> List[Dict]:
         with self.lock:
             cursor = self.monitor_conn.execute(
@@ -533,7 +575,6 @@ class MonitorDB:
             cols = [desc[0] for desc in cursor.description]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
-    # ---- تحديث Confusion Matrix ----
     def update_confusion_matrix(self, system_name: str, tp, tn, fp, fn):
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0
@@ -554,7 +595,7 @@ class MonitorDB:
         return {"precision": precision, "recall": recall, "f1": f1}
 
 # =============================================================================
-# 📊 ADVANCED ANALYTICS ENGINE (محسن بالكامل)
+# 📊 ADVANCED ANALYTICS ENGINE (نفس الكود السابق)
 # =============================================================================
 
 class AdvancedAnalyticsEngine:
@@ -565,7 +606,6 @@ class AdvancedAnalyticsEngine:
         self.news_cache = {}
         self.liquidity_levels_cache = {}
 
-    # ---- جلب بيانات السوق الحالية ----
     def fetch_market_data(self, symbol: str) -> Dict:
         try:
             ticker = self.exchange.fetch_ticker(symbol)
@@ -583,7 +623,6 @@ class AdvancedAnalyticsEngine:
         except Exception as e:
             return {'error': str(e)}
 
-    # ---- حساب قوة الاتجاه باستخدام ADX المحسن ----
     def trend_strength(self, ohlcv: List) -> float:
         if len(ohlcv) < 50:
             return 0.0
@@ -607,7 +646,6 @@ class AdvancedAnalyticsEngine:
             trs.append(tr)
         return np.mean(trs[-period:])
 
-    # ---- حساب الزخم المحسن (RSI + MACD + CCI) ----
     def momentum_score(self, ohlcv: List) -> float:
         if len(ohlcv) < 30:
             return 50.0
@@ -665,7 +703,6 @@ class AdvancedAnalyticsEngine:
         cci = (tp[-1] - sma_tp) / (0.015 * mad)
         return max(-100, min(100, cci))
 
-    # ---- حساب التمويل ----
     def funding_rate(self, symbol: str) -> float:
         try:
             s = symbol.split('/')[0]
@@ -677,7 +714,6 @@ class AdvancedAnalyticsEngine:
             pass
         return 0.0
 
-    # ---- حساب التغير في OI ----
     def oi_change_1h(self, symbol: str) -> float:
         try:
             s = symbol.split('/')[0]
@@ -708,7 +744,6 @@ class AdvancedAnalyticsEngine:
             pass
         return 0.0
 
-    # ---- تحديد وضع السوق ----
     def detect_market_regime(self, ohlcv: List) -> str:
         if len(ohlcv) < 50:
             return "UNKNOWN"
@@ -723,7 +758,6 @@ class AdvancedAnalyticsEngine:
         else:
             return "RANGING"
 
-    # ---- أخبار حديثة مع Cache باستخدام NewsAPI ----
     def recent_news(self, symbol: str, limit=5) -> List[str]:
         if not NEWS_ENABLED:
             return []
@@ -734,7 +768,6 @@ class AdvancedAnalyticsEngine:
             if now - timestamp < NEWS_CACHE_TTL:
                 return data
         try:
-            # استخدام NewsAPI
             coin = symbol.split('/')[0].lower()
             url = f"https://newsapi.org/v2/everything?q={coin}&apiKey={NEWS_API_KEY}&language=en&sortBy=publishedAt&pageSize={limit}"
             resp = requests.get(url, timeout=5)
@@ -747,8 +780,6 @@ class AdvancedAnalyticsEngine:
                     return titles
         except Exception as e:
             logger.debug(f"News API error: {e}")
-        
-        # Fallback: استخدام Cryptopanic
         try:
             coin = symbol.split('/')[0].lower()
             url = f"https://cryptopanic.com/api/v1/posts/?auth_token={NEWS_API_KEY}&currencies={coin}"
@@ -762,19 +793,13 @@ class AdvancedAnalyticsEngine:
             pass
         return []
 
-    # ============================================================
-    # 🆕 1. تحليل بنية السوق (Market Structure)
-    # ============================================================
+    # ===== Market Structure =====
     def detect_market_structure(self, ohlcv: List) -> Dict:
-        """تحليل بنية السوق: Higher Highs, Lower Lows, Breakouts, Fakeouts"""
         if len(ohlcv) < 50:
             return {"structure": "UNKNOWN", "breakout": False, "fakeout": False}
-        
         highs = [c[2] for c in ohlcv]
         lows = [c[3] for c in ohlcv]
         closes = [c[4] for c in ohlcv]
-        
-        # تحديد القمم والقيعان المحلية
         swing_highs = []
         swing_lows = []
         for i in range(2, len(highs)-2):
@@ -782,17 +807,12 @@ class AdvancedAnalyticsEngine:
                 swing_highs.append((i, highs[i]))
             if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
                 swing_lows.append((i, lows[i]))
-        
-        # التحقق من الاختراق
         last_high = max(highs[-10:])
         last_low = min(lows[-10:])
         prev_high = max(highs[-20:-10]) if len(highs) >= 20 else last_high
         prev_low = min(lows[-20:-10]) if len(lows) >= 20 else last_low
-        
         breakout_up = closes[-1] > prev_high * 1.01
         breakout_down = closes[-1] < prev_low * 0.99
-        
-        # التحقق من الفيك أوت (Fakeout)
         fakeout_up = False
         fakeout_down = False
         if len(ohlcv) >= 30:
@@ -801,8 +821,6 @@ class AdvancedAnalyticsEngine:
                 fakeout_up = True
             if min(lows[-15:]) < prev_low * 0.99 and closes[-1] > prev_low * 1.005:
                 fakeout_down = True
-        
-        # تحديد وضع السوق الحقيقي
         if breakout_up and not fakeout_up:
             structure = "BREAKOUT_UP"
         elif breakout_down and not fakeout_down:
@@ -822,7 +840,6 @@ class AdvancedAnalyticsEngine:
                 structure = "RANGING"
         else:
             structure = "RANGING"
-        
         return {
             "structure": structure,
             "breakout_up": breakout_up,
@@ -835,43 +852,31 @@ class AdvancedAnalyticsEngine:
             "prev_low": prev_low
         }
 
-    # ============================================================
-    # 🆕 2. تحليل السيولة (Liquidity Levels)
-    # ============================================================
+    # ===== Liquidity Levels =====
     def detect_liquidity_levels(self, orderbook: Dict, ohlcv: List) -> Dict:
-        """كشف مناطق السيولة من Order Book والبيانات التاريخية"""
         if not orderbook:
             return {"high_liquidity": [], "low_liquidity": []}
-        
         bids = orderbook.get('bids', [])
         asks = orderbook.get('asks', [])
-        
         high_liquidity_bids = []
         high_liquidity_asks = []
-        
         bid_clusters = defaultdict(float)
         ask_clusters = defaultdict(float)
-        
         for price, amount in bids[:20]:
             if amount > 0:
                 key = round(price / (price * 0.001), 3)
                 bid_clusters[key] += amount * price
-        
         for price, amount in asks[:20]:
             if amount > 0:
                 key = round(price / (price * 0.001), 3)
                 ask_clusters[key] += amount * price
-        
         high_liquidity_bids = sorted(bid_clusters.items(), key=lambda x: x[1], reverse=True)[:3]
         high_liquidity_asks = sorted(ask_clusters.items(), key=lambda x: x[1], reverse=True)[:3]
-        
         if len(ohlcv) >= 50:
             highs = [c[2] for c in ohlcv[-50:]]
             lows = [c[3] for c in ohlcv[-50:]]
-            
             resistance_levels = []
             support_levels = []
-            
             for i in range(5, len(highs)-5):
                 if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
                     count = sum(1 for j in range(i-10, i+10) if abs(highs[j] - highs[i]) / highs[i] < 0.005)
@@ -881,21 +886,16 @@ class AdvancedAnalyticsEngine:
                     count = sum(1 for j in range(i-10, i+10) if abs(lows[j] - lows[i]) / lows[i] < 0.005)
                     if count >= 3:
                         support_levels.append(lows[i])
-            
             high_liquidity_bids.extend([(f"SUPPORT_{i+1}", v) for i, v in enumerate(support_levels[:3])])
             high_liquidity_asks.extend([(f"RESISTANCE_{i+1}", v) for i, v in enumerate(resistance_levels[:3])])
-        
         return {
             "high_liquidity_bids": high_liquidity_bids,
             "high_liquidity_asks": high_liquidity_asks,
             "liquidity_imbalance": sum([a[1] for a in high_liquidity_asks]) - sum([b[1] for b in high_liquidity_bids])
         }
 
-    # ============================================================
-    # 🆕 3. تحليل تدفق الأوامر (Order Flow)
-    # ============================================================
+    # ===== Order Flow =====
     def analyze_order_flow(self, symbol: str) -> Dict:
-        """تحليل تدفق الأوامر: CVD, Delta Volume, Imbalance"""
         try:
             s = symbol.split('/')[0]
             url = f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={s}USDT&period=5m&limit=24"
@@ -906,21 +906,17 @@ class AdvancedAnalyticsEngine:
                     buy_vol = sum(float(d['buyVol']) for d in data[-10:])
                     sell_vol = sum(float(d['sellVol']) for d in data[-10:])
                     total_vol = buy_vol + sell_vol
-                    
                     imbalance = (buy_vol - sell_vol) / total_vol if total_vol > 0 else 0
-                    
                     cvd = 0
                     cvd_values = []
                     for d in data:
                         delta = float(d['buyVol']) - float(d['sellVol'])
                         cvd += delta
                         cvd_values.append(cvd)
-                    
                     cvd_trend = 0
                     if len(cvd_values) >= 5:
                         slope = np.polyfit(range(len(cvd_values[-5:])), cvd_values[-5:], 1)[0]
                         cvd_trend = 1 if slope > 0 else (-1 if slope < 0 else 0)
-                    
                     return {
                         'buy_volume': buy_vol,
                         'sell_volume': sell_vol,
@@ -931,7 +927,6 @@ class AdvancedAnalyticsEngine:
                     }
         except Exception as e:
             logger.debug(f"Order flow error: {e}")
-        
         return {
             'buy_volume': 0,
             'sell_volume': 0,
@@ -941,21 +936,15 @@ class AdvancedAnalyticsEngine:
             'delta': 0
         }
 
-    # ============================================================
-    # 🆕 4. نشاط الحيتان (Whale Activity)
-    # ============================================================
+    # ===== Whale Activity =====
     def detect_whale_activity(self, symbol: str) -> int:
-        """كشف نشاط الحيتان من حجم الصفقات الكبيرة"""
         try:
             trades = self.exchange.fetch_trades(symbol, limit=100)
             if not trades:
                 return 0
-            
             avg_size = np.mean([t['amount'] for t in trades])
             std_size = np.std([t['amount'] for t in trades])
-            
             whale_trades = [t for t in trades if t['amount'] > avg_size + 2 * std_size]
-            
             if len(whale_trades) > 5:
                 return 3
             elif len(whale_trades) > 3:
@@ -967,11 +956,8 @@ class AdvancedAnalyticsEngine:
         except:
             return 0
 
-    # ============================================================
-    # 🆕 5. مؤشر Fear & Greed
-    # ============================================================
+    # ===== Fear & Greed =====
     def get_fear_greed_index(self) -> int:
-        """جلب مؤشر الخوف والجشع"""
         try:
             resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
             if resp.status_code == 200:
@@ -981,34 +967,24 @@ class AdvancedAnalyticsEngine:
             pass
         return 50
 
-    # ============================================================
-    # 🆕 6. ارتباط البيتكوين (Correlation)
-    # ============================================================
+    # ===== BTC Correlation =====
     def get_btc_correlation(self, symbol: str) -> float:
-        """حساب ارتباط العملة مع البيتكوين"""
         if symbol.startswith('BTC'):
             return 1.0
-        
         try:
             symbol_ohlcv = self.exchange.fetch_ohlcv(symbol, '15m', limit=96)
             btc_ohlcv = self.exchange.fetch_ohlcv('BTC/USDT:USDT', '15m', limit=96)
-            
             if len(symbol_ohlcv) < 50 or len(btc_ohlcv) < 50:
                 return 0.5
-            
             s_close = np.array([c[4] for c in symbol_ohlcv])
             b_close = np.array([c[4] for c in btc_ohlcv])
-            
             corr = np.corrcoef(s_close, b_close)[0, 1]
             return max(-1, min(1, corr))
         except:
             return 0.5
 
-    # ============================================================
-    # 🆕 7. جلسات التداول (Session Analysis)
-    # ============================================================
+    # ===== Session =====
     def get_session(self) -> str:
-        """تحديد جلسة التداول الحالية"""
         now = datetime.now(timezone.utc)
         hour = now.hour
         if 0 <= hour < 8:
@@ -1018,18 +994,13 @@ class AdvancedAnalyticsEngine:
         else:
             return "NEW_YORK"
 
-    # ============================================================
-    # 🆕 8. تحليل شامل للسوق
-    # ============================================================
+    # ===== Analyze Market =====
     def analyze_market(self, symbol: str) -> Dict:
-        """تحليل سوق شامل يجمع كل المؤشرات المتقدمة"""
         market = self.fetch_market_data(symbol)
         if 'error' in market:
             return {'error': market['error']}
-        
         ohlcv = market.get('ohlcv', [])
         orderbook = market.get('orderbook', {})
-        
         structure = self.detect_market_structure(ohlcv)
         liquidity = self.detect_liquidity_levels(orderbook, ohlcv)
         order_flow = self.analyze_order_flow(symbol)
@@ -1037,12 +1008,9 @@ class AdvancedAnalyticsEngine:
         fng = self.get_fear_greed_index()
         corr = self.get_btc_correlation(symbol)
         session = self.get_session()
-        
         closes = [c[4] for c in ohlcv] if ohlcv else []
         rsi = self._rsi(closes) if closes else 50
-        
         liquidation_levels = self._estimate_liquidation_levels(market.get('price', 0))
-        
         result = {
             'symbol': symbol,
             'price': market.get('price', 0),
@@ -1062,10 +1030,8 @@ class AdvancedAnalyticsEngine:
             'liquidation_levels': liquidation_levels,
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
-        
         if hasattr(self, 'db'):
             self.db.save_market_analysis(result)
-        
         return result
 
     def _estimate_liquidation_levels(self, price):
@@ -1077,7 +1043,7 @@ class AdvancedAnalyticsEngine:
         }
 
 # =============================================================================
-# 🤖 AI CLIENT (محسن مع تحليل احتمالات)
+# 🤖 AI CLIENT (مع دمج الدروس)
 # =============================================================================
 
 logger = logging.getLogger(__name__)
@@ -1108,8 +1074,6 @@ class AIClient:
         return filtered
 
     def _call_ai_with_probabilities(self, client, model, trade_data, market_data):
-        """استدعاء AI مع تحليل احتمالات TP, SL, Sideways, Reversal"""
-        
         lessons = self._get_relevant_lessons(trade_data.get('market_regime', 'UNKNOWN'), trade_data['symbol'])
         lessons_text = ""
         if lessons:
@@ -1181,7 +1145,6 @@ RSI: {market_data.get('rsi', 50):.1f}
     "reason": "سبب مختصر بالعربية يوضح التحليل"
 }}
 """
-
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -1213,12 +1176,9 @@ RSI: {market_data.get('rsi', 50):.1f}
         }
 
     def get_recommendation(self, trade_data: Dict, market_data: Dict) -> Dict:
-        """الحصول على توصية مع تحليل احتمالات"""
-        
         result1 = self._call_ai_with_probabilities(
             self.client_mistral, AI_MODEL, trade_data, market_data
         )
-        
         result = {
             'recommendation': result1.get('recommendation', 'HOLD'),
             'confidence': result1.get('confidence', 50),
@@ -1232,7 +1192,6 @@ RSI: {market_data.get('rsi', 50):.1f}
             'ai2_explanation': '',
             'dual_agreement': False
         }
-        
         if DUAL_AI_ENABLED:
             result2 = self._call_ai_with_probabilities(
                 self.client_oss, AI_MODEL_OSS, trade_data, market_data
@@ -1240,7 +1199,6 @@ RSI: {market_data.get('rsi', 50):.1f}
             result['ai2_decision'] = result2.get('recommendation', 'HOLD')
             result['ai2_confidence'] = result2.get('confidence', 50)
             result['ai2_explanation'] = result2.get('reason', '')
-            
             if result1.get('recommendation') == result2.get('recommendation'):
                 result['dual_agreement'] = True
                 result['confidence'] = min(100, (result1.get('confidence', 50) + result2.get('confidence', 50)) / 2 + 10)
@@ -1252,7 +1210,6 @@ RSI: {market_data.get('rsi', 50):.1f}
             else:
                 result['confidence'] = (result1.get('confidence', 50) + result2.get('confidence', 50)) / 2
                 result['reason'] = f"⚠️ اختلاف بين النموذجين:\nالنموذج 1: {result1.get('reason', '')}\nالنموذج 2: {result2.get('reason', '')}"
-        
         return result
 
 # =============================================================================
@@ -1281,22 +1238,18 @@ class TelegramBot:
         )
 
     async def market(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """عرض تحليل السوق المتقدم لعملة معينة"""
         if not context.args:
             await update.message.reply_text("يرجى إرسال اسم العملة: /market BTC")
             return
-        
         symbol = context.args[0].upper()
         if not symbol.endswith('USDT'):
             symbol += 'USDT'
         symbol = f"{symbol}/USDT:USDT"
-        
         try:
             market_data = context.bot_data.get('market_analysis', {}).get(symbol, {})
             if not market_data:
                 await update.message.reply_text("لم يتم العثور على تحليل لهذه العملة.")
                 return
-            
             msg = f"📊 **تحليل السوق - {symbol}**\n\n"
             msg += f"**بنية السوق:** {market_data.get('market_structure', 'N/A')}\n"
             msg += f"**اختراق:** {'✅' if market_data.get('breakout', False) else '❌'}\n"
@@ -1318,7 +1271,6 @@ class TelegramBot:
         if not trades:
             await update.message.reply_text("لا توجد صفقات مفتوحة حالياً.")
             return
-
         msg = "📊 **الصفقات المفتوحة**\n\n"
         for t in trades:
             analysis = self.db.get_latest_open_analysis(t['id'])
@@ -1345,12 +1297,10 @@ class TelegramBot:
         except:
             await update.message.reply_text("المعرف غير صحيح.")
             return
-
         analysis = self.db.get_latest_open_analysis(trade_id)
         if not analysis:
             await update.message.reply_text("لم يتم العثور على تحليل لهذه الصفقة.")
             return
-
         msg = f"🔍 **توصية الصفقة #{trade_id}**\n"
         msg += f"العملة: {analysis['symbol']}\n"
         msg += f"الربح الحالي: {analysis['profit_pct']:+.2f}%\n"
@@ -1382,7 +1332,6 @@ class TelegramBot:
         if not perf:
             await update.message.reply_text("لا توجد إحصائيات كافية بعد.")
             return
-
         msg = "📈 **إحصائيات أداء الأنظمة**\n\n"
         for p in perf:
             msg += f"**{p['system_name']}**\n"
@@ -1399,7 +1348,6 @@ class TelegramBot:
         if not lessons:
             await update.message.reply_text("لا توجد دروس مستفادة بعد.")
             return
-
         msg = "📚 **الدروس المستفادة**\n\n"
         for l in lessons[:10]:
             msg += f"• {l['symbol']} | {l['market_regime']}\n"
@@ -1444,7 +1392,7 @@ class TelegramBot:
         self.app.run_polling()
 
 # =============================================================================
-# 🔁 MONITOR LOOP (محسن مع تحليل السوق المتقدم)
+# 🔁 MONITOR LOOP
 # =============================================================================
 
 class MonitorLoop:
@@ -1501,15 +1449,12 @@ class MonitorLoop:
             try:
                 open_trades = self.db.get_open_trades()
                 logger.info(f"Monitoring {len(open_trades)} open trades")
-                
                 for trade in open_trades:
                     symbol = trade['symbol']
                     if symbol not in self.market_cache or time.time() - self.market_cache[symbol].get('time', 0) > 300:
                         market_data = self.analytics.analyze_market(symbol)
                         self.market_cache[symbol] = {'data': market_data, 'time': time.time()}
-                    
                     self.queue.put({'trade': trade})
-                
                 self._analyze_closed_trades()
                 self._update_system_performance()
             except Exception as e:
@@ -1671,6 +1616,7 @@ class MonitorLoop:
         msg += f"احتمال TP: {prob_tp:.0f}% | احتمال SL: {prob_sl:.0f}%\n"
         msg += f"السبب: {reason}\n"
         msg += f"الثقة: {confidence:.0f}%"
+        # يمكن إرسالها عبر التيليجرام هنا إذا أردت
 
     def _analyze_closed_trades(self):
         pass
@@ -1683,7 +1629,6 @@ class MonitorLoop:
 # =============================================================================
 
 def show_ip_on_startup():
-    """عرض IP عند بدء التشغيل"""
     ip = get_public_ip()
     print("\n" + "=" * 70)
     print(f"🌐 CURRENT PUBLIC IP: {ip}")
@@ -1705,18 +1650,28 @@ def main():
     logger.info("📰 News API: ee6adc6bb00849d5bb0b1a29e62d5ed4")
     logger.info("🤖 AI Models: Mistral + GPT-OSS-120b")
     logger.info("🔑 Binance API Key: 6wsmpKnCpMpC3u8H6GuEbIarvCPtK2fyNmbl7GfEVq0dK2BDsC2fTsBrqxmFK5pB")
+    logger.info("🔄 Binance Fallback: ENABLED (will fetch positions directly from Binance)")
 
-    # عرض IP التطبيق للإضافة في Whitelist
     deployment_ip = show_ip_on_startup()
     logger.info(f"📌 Add this IP to Binance Whitelist: {deployment_ip}")
 
-    db = MonitorDB(MAIN_DB_PATH, MONITOR_DB_PATH)
+    # إنشاء كائن exchange مع مفاتيح لجلب المراكز (Futures)
+    exchange = ccxt.binance({
+        'apiKey': BINANCE_API_KEY,
+        'secret': BINANCE_SECRET,
+        'enableRateLimit': True,
+        'options': {'defaultType': 'swap'}  # Futures
+    })
 
+    # كائن public للبيانات العامة (بدون مفاتيح)
     exchange_public = ccxt.binance({
         "enableRateLimit": True,
         "options": {"defaultType": "swap"}
     })
-    
+
+    # إنشاء قاعدة البيانات مع تمرير exchange
+    db = MonitorDB(MAIN_DB_PATH, MONITOR_DB_PATH, exchange=exchange)
+
     analytics = AdvancedAnalyticsEngine(exchange_public)
     analytics.db = db
 
@@ -1724,12 +1679,10 @@ def main():
 
     telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db)
 
-    # تشغيل حلقة المراقبة (تعمل في خيط منفصل)
     monitor = MonitorLoop(db, analytics, ai, telegram_bot)
     monitor.start()
 
-    # ✅ تشغيل Telegram Bot في الخيط الرئيسي (بدون Thread)
-    # هذا يحل مشكلة "no current event loop"
+    # تشغيل Telegram Bot في الخيط الرئيسي
     telegram_bot.run()
 
     logger.info("Monitor is running. Press Ctrl+C to stop.")
@@ -1741,6 +1694,5 @@ def main():
         monitor.stop()
 
 if __name__ == "__main__":
-    # عرض IP فور بدء التشغيل
     show_ip_on_startup()
     main()
