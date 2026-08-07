@@ -91,7 +91,7 @@ ADMIN_CHAT_ID = "YOUR_CHAT_ID"            # معرف الدردشة لتلقي �
 
 # -------------------- API Integration (بدلاً من SQLite المباشر) --------------------
 APEX_API_URL = "http://localhost:8080/api"  # عنوان API البوت الرئيسي
-USE_API_INSTEAD_OF_DB = True                # تفعيل جلب البيانات عبر API
+USE_API_INSTEAD_OF_DB = False               # ✅ تم تعطيل API لتجنب خطأ localhost:8080
 
 # -------------------- قواعد البيانات --------------------
 MAIN_DB_PATH = "apex_aggressive_v3.db"    # قاعدة بيانات البوت الأساسي (للاحتياط)
@@ -1724,11 +1724,13 @@ def main():
 
     telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db)
 
+    # تشغيل حلقة المراقبة (تعمل في خيط منفصل)
     monitor = MonitorLoop(db, analytics, ai, telegram_bot)
     monitor.start()
 
-    telegram_thread = threading.Thread(target=telegram_bot.run, daemon=True)
-    telegram_thread.start()
+    # ✅ تشغيل Telegram Bot في الخيط الرئيسي (بدون Thread)
+    # هذا يحل مشكلة "no current event loop"
+    telegram_bot.run()
 
     logger.info("Monitor is running. Press Ctrl+C to stop.")
     try:
