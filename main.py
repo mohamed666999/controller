@@ -1232,35 +1232,46 @@ class TelegramBot:
             return
         msg = "📊 **الصفقات المفتوحة**\n\n"
         for t in trades:
-            # استخراج البيانات الأساسية من البوت الأول (API) مباشرة
-            symbol = t.get('symbol', 'UNKNOWN').replace(':USDT', '')  # تنظيف اسم العملة
+            # تنظيف البيانات
+            symbol = t.get('symbol', 'UNKNOWN').replace(':USDT', '')
             side = t.get('side', 'UNKNOWN')
-            entry_price = t.get('entry_price', 0)
+            
+            # تقليم الأرقام الطويلة جداً (مثل 0.0028219748) إلى 6 أرقام عشرية
+            entry_price = round(float(t.get('entry_price', 0)), 6)
+            sl_price = round(float(t.get('sl_price', 0)), 6)
+            tp_price = round(float(t.get('tp_price', 0)), 6)
+            
             leverage = t.get('leverage_used', 1)
             slot = t.get('slot_used', '?')
-            sl_price = t.get('sl_price', 0)
-            tp_price = t.get('tp_price', 0)
+            score = t.get('confidence', 0)
+            regime = t.get('regime', 'غير محدد')
+            ai_exp = t.get('ai_explanation', '')
             direction_emoji = '🟢 LONG' if side == 'LONG' else '🔴 SHORT'
 
-            # طباعة معلومات الصفقة الفورية
+            # 1. معلومات الصفقة الأساسية
             msg += f"• **{symbol}**\n"
-            msg += f"الاتجاه: {direction_emoji}\n"
-            msg += f"سعر الدخول: {entry_price}\n"
-            msg += f"الرافعة: x{leverage} (Slot {slot})\n"
-            msg += f"إيقاف الخسارة: {sl_price}\n"
-            msg += f"جني الأرباح: {tp_price}\n"
+            msg += f"الاتجاه: {direction_emoji} | الرافعة: x{leverage} (Slot {slot})\n"
+            msg += f"الدخول: `{entry_price}`\n"
+            msg += f"الوقف: `{sl_price}` | الهدف: `{tp_price}`\n"
 
-            # محاولة جلب تحليل الذكاء الاصطناعي إن وُجد
+            # 2. أسباب الدخول (من البوت الأول)
+            msg += f"قوة الدخول: {score:.1f}/100 | السوق: {regime}\n"
+            if ai_exp:
+                msg += f"💬 **سبب الدخول (AI):** _{ai_exp}_\n"
+
+            # 3. المتابعة الحية (من البوت الثاني - بعد 60 ثانية من فتح الصفقة)
             analysis = self.db.get_latest_open_analysis(t.get('id', 0))
             if analysis:
                 profit = analysis.get('profit_pct', 0)
                 rec = analysis.get('recommendation', 'HOLD')
                 stars = '⭐' * min(5, int(analysis.get('target_progress', 0) / 20))
-                msg += f"الربح الحالي: {profit:+.2f}% | {stars}\n"
-                msg += f"توصية AI: {rec} (ثقة: {analysis.get('ai_confidence', 0):.0f}%)\n"
+                msg += f"\n📈 **المتابعة الحية:**\n"
+                msg += f"الربح الحالي: {profit:+.2f}% {stars}\n"
+                msg += f"قرار الذكاء الاصطناعي الآن: **{rec}** (ثقة: {analysis.get('ai_confidence', 0):.0f}%)\n"
             else:
-                msg += f"⏳ جاري التحليل بواسطة الذكاء الاصطناعي...\n"
-            msg += "\n"
+                msg += f"\n⏳ _جاري جمع بيانات الحيتان والسيولة للمتابعة الحية..._\n"
+
+            msg += "\n" + "─"*25 + "\n\n"
         await update.message.reply_text(msg, parse_mode='Markdown')
 
     # =====================================================================
