@@ -1222,6 +1222,9 @@ class TelegramBot:
         except Exception as e:
             await update.message.reply_text(f"خطأ في جلب التحليل: {e}")
 
+    # =====================================================================
+    # 🔹 الدالة المعدلة positions – تعرض البيانات الأساسية من البوت الأول
+    # =====================================================================
     async def positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         trades = self.db.get_open_trades()
         if not trades:
@@ -1229,20 +1232,38 @@ class TelegramBot:
             return
         msg = "📊 **الصفقات المفتوحة**\n\n"
         for t in trades:
-            analysis = self.db.get_latest_open_analysis(t['id'])
+            # استخراج البيانات الأساسية من البوت الأول (API) مباشرة
+            symbol = t.get('symbol', 'UNKNOWN').replace(':USDT', '')  # تنظيف اسم العملة
+            side = t.get('side', 'UNKNOWN')
+            entry_price = t.get('entry_price', 0)
+            leverage = t.get('leverage_used', 1)
+            slot = t.get('slot_used', '?')
+            sl_price = t.get('sl_price', 0)
+            tp_price = t.get('tp_price', 0)
+            direction_emoji = '🟢 LONG' if side == 'LONG' else '🔴 SHORT'
+
+            # طباعة معلومات الصفقة الفورية
+            msg += f"• **{symbol}**\n"
+            msg += f"الاتجاه: {direction_emoji}\n"
+            msg += f"سعر الدخول: {entry_price}\n"
+            msg += f"الرافعة: x{leverage} (Slot {slot})\n"
+            msg += f"إيقاف الخسارة: {sl_price}\n"
+            msg += f"جني الأرباح: {tp_price}\n"
+
+            # محاولة جلب تحليل الذكاء الاصطناعي إن وُجد
+            analysis = self.db.get_latest_open_analysis(t.get('id', 0))
             if analysis:
                 profit = analysis.get('profit_pct', 0)
                 rec = analysis.get('recommendation', 'HOLD')
                 stars = '⭐' * min(5, int(analysis.get('target_progress', 0) / 20))
-                msg += f"• {t['symbol']} | الربح: {profit:+.2f}% | {stars}\n"
-                msg += f"  التوصية: {rec} (ثقة: {analysis.get('ai_confidence', 0):.0f}%)\n"
-                msg += f"  TP: {analysis.get('probability_tp', 0):.0f}% | SL: {analysis.get('probability_sl', 0):.0f}%\n"
-                if analysis.get('ai2_decision'):
-                    msg += f"  النموذج الثاني: {analysis['ai2_decision']} ({analysis.get('ai2_confidence', 0):.0f}%)\n"
-                msg += f"  APEX: {analysis.get('apex_score', 0):.1f} | ISS: {analysis.get('iss_score', 0):.1f}\n\n"
+                msg += f"الربح الحالي: {profit:+.2f}% | {stars}\n"
+                msg += f"توصية AI: {rec} (ثقة: {analysis.get('ai_confidence', 0):.0f}%)\n"
             else:
-                msg += f"• {t['symbol']} | لا توجد بيانات كافية\n"
+                msg += f"⏳ جاري التحليل بواسطة الذكاء الاصطناعي...\n"
+            msg += "\n"
         await update.message.reply_text(msg, parse_mode='Markdown')
+
+    # =====================================================================
 
     async def advice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
