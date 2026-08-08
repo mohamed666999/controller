@@ -2,7 +2,7 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║     APEX MONITOR BOT — Telegram AI Monitor v4.3            ║
-║  Architecture: Single AI Model (GPT-OSS-120B)              ║
+║  Architecture: Single AI Model (poolside/laguna-xs-2.1)    ║
 ║  No local trades DB, reads from APEX API only             ║
 ╚══════════════════════════════════════════════════════════════╝
 """
@@ -66,12 +66,12 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "6033203084"))
 APEX_API_URL = os.getenv("APEX_API_URL", "https://binancetrading-production.up.railway.app")
 MONITOR_DB_PATH = os.getenv("MONITOR_DB_PATH", "monitor.db")
 
-# 🔴 المفتاح الوحيد المطلوب هو NVIDIA_API_KEY_OSS
-NVIDIA_API_KEY_OSS = os.getenv("NVIDIA_API_KEY_OSS", "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")
+# 🔴 المفتاح الجديد ونموذج poolside/laguna-xs-2.1
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "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")
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 MONITOR_INTERVAL = 60
-AI_MODEL = "openai/gpt-oss-120b"  # النموذج الوحيد المستخدم
+AI_MODEL = "poolside/laguna-xs-2.1"  # النموذج الجديد
 
 # =============================================================================
 # 🛡️ CIRCUIT BREAKER
@@ -161,7 +161,7 @@ class MonitorDB:
     def save_open_analysis(self, data: Dict[str, Any]):
         with self.lock:
             try:
-                # 🔴 تم تصحيح عدد الـ ? إلى 24 (بعد إزالة عمود id)
+                # عدد الـ ? = 24 (بدون id)
                 self.monitor_conn.execute("""
                     INSERT INTO open_analysis (
                         trade_id, symbol, side, entry_price, current_price,
@@ -201,7 +201,6 @@ class MonitorDB:
             return {}
 
     def get_trade_by_id(self, trade_id: int) -> Dict:
-        """جلب تفاصيل الصفقة من قاعدة البيانات (في حال الحاجة لتحليل فوري)"""
         trades = self.get_open_trades()
         for t in trades:
             if t.get('id') == trade_id:
@@ -285,7 +284,6 @@ class AdvancedAnalyticsEngine:
     def analyze_market(self, symbol: str) -> Dict:
         market = self.fetch_market_data(symbol)
         if 'error' in market: return {'error': market['error']}
-        
         ohlcv = market.get('ohlcv', [])
         return {
             'symbol': symbol,
@@ -295,14 +293,14 @@ class AdvancedAnalyticsEngine:
         }
 
 # =============================================================================
-# 🤖 AI CLIENT (GPT-OSS-120B فقط)
+# 🤖 AI CLIENT (poolside/laguna-xs-2.1)
 # =============================================================================
 
 class AIClient:
     def __init__(self):
         self.client = OpenAI(
             base_url=NVIDIA_BASE_URL,
-            api_key=NVIDIA_API_KEY_OSS
+            api_key=NVIDIA_API_KEY
         )
 
     def get_recommendation(self, trade_data: Dict) -> Dict:
@@ -339,26 +337,30 @@ Funding Rate: {trade_data.get('funding_rate', 0):.6f}
 - لا تخترع بيانات غير موجودة. إذا كانت البيانات غير كافية، استخدم HOLD وثقة منخفضة.
 """
         try:
-            logging.info(f"🤖 Calling GPT-OSS-120B for {trade_data.get('symbol')}")
+            logging.info(f"🤖 Calling {AI_MODEL} for {trade_data.get('symbol')}")
             start_time = time.time()
-            
+
             response = self.client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[
                     {"role": "system", "content": "You are a quantitative trading analysis assistant. Return valid JSON only."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.2,
-                max_tokens=500,
-                timeout=30.0
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=8192,
+                stream=False,  # للحصول على الرد كامل
+                extra_body={"chat_template_kwargs": {"enable_thinking": True}}
             )
             elapsed = time.time() - start_time
-            logging.info(f"✅ GPT-OSS responded in {elapsed:.2f}s")
+            logging.info(f"✅ {AI_MODEL} responded in {elapsed:.2f}s")
 
             message = response.choices[0].message
+            # قد لا يحتوي النموذج الجديد على reasoning_content
+            # لكن نحتفظ بالكود تحسباً
             reasoning = getattr(message, "reasoning_content", None)
             if reasoning:
-                logging.info(f"🧠 GPT-OSS reasoning: {str(reasoning)[:200]}")
+                logging.info(f"🧠 Model reasoning: {str(reasoning)[:200]}")
 
             raw = (message.content or "").strip()
             if raw.startswith("```"):
@@ -385,11 +387,11 @@ Funding Rate: {trade_data.get('funding_rate', 0):.6f}
             result["confidence"] = float(result.get("confidence", 50))
             result["reason"] = str(result.get("reason", ""))
 
-            logging.info(f"🎯 GPT-OSS result {trade_data.get('symbol')} | {result['recommendation']} | confidence={result['confidence']:.0f}%")
+            logging.info(f"🎯 {AI_MODEL} result {trade_data.get('symbol')} | {result['recommendation']} | confidence={result['confidence']:.0f}%")
             return result
 
         except Exception as e:
-            logging.error(f"❌ GPT-OSS ERROR for {trade_data.get('symbol')}: {type(e).__name__}: {e}")
+            logging.error(f"❌ {AI_MODEL} ERROR for {trade_data.get('symbol')}: {type(e).__name__}: {e}")
             return {
                 "tp_probability": 50,
                 "sl_probability": 25,
@@ -397,7 +399,7 @@ Funding Rate: {trade_data.get('funding_rate', 0):.6f}
                 "reversal_probability": 10,
                 "recommendation": "HOLD",
                 "confidence": 0,
-                "reason": f"GPT-OSS unavailable: {type(e).__name__}"
+                "reason": f"AI unavailable: {type(e).__name__}"
             }
 
 # =============================================================================
@@ -479,28 +481,24 @@ class TelegramBot:
         # 1. حاول جلب التحليل المخزن
         analysis = self.db.get_latest_open_analysis(trade_id)
         if analysis:
-            # يوجد تحليل مخزن، اعرضه فوراً
             msg = self._format_analysis_response(trade_id, analysis)
             await update.message.reply_text(msg, parse_mode='HTML')
             return
 
-        # 2. لا يوجد تحليل مخزن، قم بتحليل فوري
+        # 2. تحليل فوري
         await update.message.reply_text("⏳ جاري تحليل الصفقة فوراً...")
         trade = self.db.get_trade_by_id(trade_id)
         if not trade:
             await update.message.reply_text("⚠️ لم يتم العثور على الصفقة.")
             return
 
-        # تحليل فوري
         try:
-            # جمع بيانات السوق
             symbol = trade.get('symbol')
             market_data = self.analytics.fetch_market_data(symbol)
             if 'error' in market_data:
                 await update.message.reply_text(f"⚠️ خطأ في جلب بيانات السوق: {market_data['error']}")
                 return
 
-            # بناء بيانات trade_data مشابهة لما يفعله MonitorLoop
             entry_price = float(trade.get('entry_price') or 0)
             side = trade.get('side', '')
             current_price = market_data.get('price', entry_price)
@@ -538,10 +536,8 @@ class TelegramBot:
                 'market_regime': self.analytics.detect_market_regime(ohlcv)
             }
 
-            # استدعاء AI
             ai_result = self.ai.get_recommendation(current_data)
 
-            # حفظ التحليل في قاعدة البيانات
             analysis_record = {
                 'trade_id': trade_id,
                 'symbol': symbol,
@@ -549,7 +545,7 @@ class TelegramBot:
                 'entry_price': entry_price,
                 'current_price': current_price,
                 'profit_pct': profit_pct,
-                'time_open_minutes': 0,  # غير معروف هنا
+                'time_open_minutes': 0,
                 'target_progress': target_progress,
                 'trend_strength': current_data['trend_strength'],
                 'momentum_score': current_data['momentum_score'],
@@ -562,7 +558,6 @@ class TelegramBot:
                 'ai_confidence': ai_result.get('confidence', 0),
                 'ai_explanation': ai_result.get('reason', ''),
                 'recommendation': ai_result.get('recommendation', 'HOLD'),
-                # 🔴 تصحيح أسماء الحقول لتطابق ما يخرجه الـ AI
                 'probability_tp': ai_result.get('tp_probability', 0),
                 'probability_sl': ai_result.get('sl_probability', 0),
                 'probability_sideways': ai_result.get('sideways_probability', 0),
@@ -571,7 +566,6 @@ class TelegramBot:
             }
             self.db.save_open_analysis(analysis_record)
 
-            # عرض النتيجة
             analysis = self.db.get_latest_open_analysis(trade_id)
             if analysis:
                 msg = self._format_analysis_response(trade_id, analysis)
@@ -686,7 +680,6 @@ class MonitorLoop:
         tp_price = float(trade.get('tp_price') or 0)
         sl_price = float(trade.get('sl_price') or 0)
 
-        # جلب بيانات السوق
         market_data = self.market_cache.get(symbol, {}).get('data', {})
         if not market_data or time.time() - self.market_cache.get(symbol, {}).get('time', 0) > 300:
             market_data = self.analytics.analyze_market(symbol)
@@ -764,7 +757,6 @@ class MonitorLoop:
             'ai_confidence': ai_result.get('confidence', 0),
             'ai_explanation': ai_result.get('reason', ''),
             'recommendation': ai_result.get('recommendation', 'HOLD'),
-            # 🔴 تصحيح أسماء الحقول لتطابق ما يخرجه الـ AI
             'probability_tp': ai_result.get('tp_probability', 0),
             'probability_sl': ai_result.get('sl_probability', 0),
             'probability_sideways': ai_result.get('sideways_probability', 0),
@@ -780,7 +772,7 @@ class MonitorLoop:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-    logging.info("🚀 Starting APEX Monitor Bot v4.3 (Single AI Model)")
+    logging.info("🚀 Starting APEX Monitor Bot v4.3 (Single AI Model - poolside/laguna-xs-2.1)")
 
     exchange_public = ccxt.binance({
         "enableRateLimit": True,
@@ -799,28 +791,26 @@ def main():
     analytics = AdvancedAnalyticsEngine(exchange_public)
     ai = AIClient()
 
-    # ===================================================================
-    # 🧪 اختبار GPT-OSS-120B قبل بدء التشغيل الكامل
-    # ===================================================================
+    # 🧪 اختبار النموذج الجديد
     try:
-        logging.info("🧪 Testing GPT-OSS-120B connection...")
+        logging.info(f"🧪 Testing {AI_MODEL} connection...")
         test_response = ai.client.chat.completions.create(
             model=AI_MODEL,
             messages=[
-                {"role": "user", "content": "Reply with exactly: GPT-OSS-OK"}
+                {"role": "user", "content": "Reply with exactly: LAGUNA-OK"}
             ],
             temperature=0,
             max_tokens=20,
-            timeout=10.0
+            timeout=10.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}}
         )
         test_content = test_response.choices[0].message.content.strip()
-        logging.info(f"✅ GPT TEST SUCCESS: {test_content}")
-        if "GPT-OSS-OK" not in test_content:
+        logging.info(f"✅ TEST SUCCESS: {test_content}")
+        if "LAGUNA-OK" not in test_content:
             logging.warning(f"⚠️ Unexpected test response: {test_content}")
     except Exception as e:
-        logging.error(f"❌ GPT TEST FAILED: {type(e).__name__}: {e}")
-        # نستمر في التشغيل ولكن مع تحذير، قد يعمل لاحقاً
-        logging.warning("⚠️ GPT-OSS-120B test failed, but bot will continue. Advice may show fallback values.")
+        logging.error(f"❌ TEST FAILED: {type(e).__name__}: {e}")
+        logging.warning("⚠️ AI test failed, but bot will continue. Advice may show fallback values.")
 
     monitor = MonitorLoop(db, analytics, ai)
     monitor.start()
