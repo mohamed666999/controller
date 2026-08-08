@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     APEX MONITOR BOT — Telegram AI Monitor v4.2            ║
-║  Architecture: Monitor & Analysis Only (No Execution)      ║
+║     APEX MONITOR BOT — Telegram AI Monitor v4.3            ║
+║  Architecture: Single AI Model (GPT-OSS-120B)              ║
 ║  No local trades DB, reads from APEX API only             ║
 ╚══════════════════════════════════════════════════════════════╝
 """
@@ -59,19 +59,18 @@ print("=" * 70)
 # 🔧 CONFIG
 # =============================================================================
 
-TELEGRAM_TOKEN = "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco"
-ADMIN_CHAT_ID = 6033203084
+# 🔴 استخدم متغيرات البيئة في الإنتاج، لا تضع المفاتيح هنا
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "6033203084"))
 
-APEX_API_URL = "https://binancetrading-production.up.railway.app"
-MONITOR_DB_PATH = "monitor.db"
+APEX_API_URL = os.getenv("APEX_API_URL", "https://binancetrading-production.up.railway.app")
+MONITOR_DB_PATH = os.getenv("MONITOR_DB_PATH", "monitor.db")
 
-NVIDIA_API_KEY = "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"
-NVIDIA_API_KEY_OSS = "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"
+# 🔴 المفتاح الوحيد المطلوب هو NVIDIA_API_KEY_OSS
+NVIDIA_API_KEY_OSS = os.getenv("NVIDIA_API_KEY_OSS", "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")
 
 MONITOR_INTERVAL = 60
-AI_MODEL = "mistralai/mistral-large-2407"
-AI_MODEL_OSS = "openai/gpt-oss-120b"
-DUAL_AI_ENABLED = True
+AI_MODEL = "openai/gpt-oss-120b"  # النموذج الوحيد المستخدم
 
 # =============================================================================
 # 🛡️ CIRCUIT BREAKER
@@ -129,7 +128,6 @@ class MonitorDB:
                     target_progress REAL, trend_strength REAL, momentum_score REAL,
                     funding_rate REAL, oi_change_1h REAL, oi_trend REAL, apex_score REAL,
                     iss_score REAL, ai_decision TEXT, ai_confidence REAL, ai_explanation TEXT,
-                    ai2_decision TEXT, ai2_confidence REAL, ai2_explanation TEXT,
                     recommendation TEXT, probability_tp REAL, probability_sl REAL,
                     probability_sideways REAL, probability_reversal REAL, timestamp TEXT
                 );
@@ -169,10 +167,9 @@ class MonitorDB:
                         trend_strength, momentum_score, funding_rate,
                         oi_change_1h, oi_trend, apex_score, iss_score,
                         ai_decision, ai_confidence, ai_explanation,
-                        ai2_decision, ai2_confidence, ai2_explanation,
                         recommendation, probability_tp, probability_sl,
                         probability_sideways, probability_reversal, timestamp
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     data.get('trade_id'), data.get('symbol'), data.get('side'),
                     data.get('entry_price'), data.get('current_price'), data.get('profit_pct'),
@@ -180,8 +177,7 @@ class MonitorDB:
                     data.get('trend_strength'), data.get('momentum_score'), data.get('funding_rate'),
                     data.get('oi_change_1h'), data.get('oi_trend'), data.get('apex_score'),
                     data.get('iss_score'), data.get('ai_decision'), data.get('ai_confidence'),
-                    data.get('ai_explanation'), data.get('ai2_decision', ''), data.get('ai2_confidence', 0),
-                    data.get('ai2_explanation', ''), data.get('recommendation'),
+                    data.get('ai_explanation'), data.get('recommendation'),
                     data.get('probability_tp', 0), data.get('probability_sl', 0),
                     data.get('probability_sideways', 0), data.get('probability_reversal', 0),
                     data.get('timestamp')
@@ -201,6 +197,16 @@ class MonitorDB:
                 cols = [desc[0] for desc in cursor.description]
                 return dict(zip(cols, row))
             return {}
+
+    def get_trade_by_id(self, trade_id: int) -> Dict:
+        """جلب تفاصيل الصفقة من قاعدة البيانات (في حال الحاجة لتحليل فوري)"""
+        # نفترض أن جدول trades موجود في البوت الأول، ولكننا نعتمد على API
+        # هذه الدالة لتوافق مع منطق /advice الفوري
+        trades = self.get_open_trades()
+        for t in trades:
+            if t.get('id') == trade_id:
+                return t
+        return {}
 
 # =============================================================================
 # 📊 ADVANCED ANALYTICS ENGINE
@@ -289,35 +295,18 @@ class AdvancedAnalyticsEngine:
         }
 
 # =============================================================================
-# 🤖 AI CLIENT (المطور مع كشف الأخطاء الكامل)
+# 🤖 AI CLIENT (GPT-OSS-120B فقط)
 # =============================================================================
 
 class AIClient:
     def __init__(self):
-        self.client_mistral = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=NVIDIA_API_KEY
-        )
-        self.client_oss = OpenAI(
+        self.client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
             api_key=NVIDIA_API_KEY_OSS
         )
-        # 🔴 التحقق من النماذج المتاحة فور الإنشاء
-        self._check_models()
 
-    def _check_models(self):
-        """عرض النماذج المتاحة في الـ endpoint"""
-        for name, client in [("MISTRAL", self.client_mistral), ("GPT-OSS", self.client_oss)]:
-            try:
-                models = client.models.list()
-                ids = [m.id for m in models.data]
-                logging.info(f"📋 {name} AVAILABLE MODELS: {ids[:30]}")
-            except Exception as e:
-                logging.error(f"❌ {name} MODEL LIST ERROR: {type(e).__name__}: {e}", exc_info=True)
-
-    def _call_ai_with_probabilities(self, client, model, trade_data):
-        """استدعاء AI مع كشف كامل للأخطاء"""
-        prompt = f"""أنت محلل تداول كمي. حلل الصفقة التالية:
+    def get_recommendation(self, trade_data: Dict) -> Dict:
+        prompt = f"""أنت محلل تداول كمي. حلل الصفقة التالية بناءً على البيانات الحالية فقط.
 
 العملة: {trade_data.get('symbol')}
 الاتجاه: {trade_data.get('side', 'UNKNOWN')}
@@ -330,178 +319,128 @@ class AIClient:
 قوة الاتجاه: {trade_data.get('trend_strength', 0):.1f}
 الزخم / RSI التقريبي: {trade_data.get('momentum_score', 50):.1f}
 Funding Rate: {trade_data.get('funding_rate', 0):.6f}
-تغير OI خلال ساعة: {trade_data.get('oi_change_1h', 0):.4f}
+تغير Open Interest خلال ساعة: {trade_data.get('oi_change_1h', 0):.4f}
 حالة السوق: {trade_data.get('market_regime', 'UNKNOWN')}
 
-أعطني تقييماً احتماليًا للصفقة. يجب أن يكون مجموع الاحتمالات 100%.
-أجب JSON فقط بدون Markdown:
+أعطني JSON فقط، بدون Markdown وبدون أي نص خارجه:
 {{
-    "tp_probability": 65,
-    "sl_probability": 20,
-    "sideways_probability": 10,
-    "reversal_probability": 5,
+    "tp_probability": 0,
+    "sl_probability": 0,
+    "sideways_probability": 0,
+    "reversal_probability": 0,
     "recommendation": "HOLD",
-    "confidence": 85,
-    "reason": "سبب التحليل"
+    "confidence": 0,
+    "reason": "..."
 }}
+
+قواعد:
+- مجموع الاحتمالات يجب أن يكون 100.
+- recommendation يجب أن تكون واحدة من: BUY, SELL, HOLD, EXIT
+- لا تخترع بيانات غير موجودة. إذا كانت البيانات غير كافية، استخدم HOLD وثقة منخفضة.
 """
         try:
-            logging.info(f"🤖 Calling AI: {model} | {trade_data.get('symbol')}")
+            logging.info(f"🤖 Calling GPT-OSS-120B for {trade_data.get('symbol')}")
             start_time = time.time()
             
-            response = client.chat.completions.create(
-                model=model,
+            response = self.client.chat.completions.create(
+                model=AI_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a quantitative trading analyst. Return valid JSON only."},
+                    {"role": "system", "content": "You are a quantitative trading analysis assistant. Return valid JSON only."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.2,
-                max_tokens=400,
+                max_tokens=500,
                 timeout=30.0
             )
             elapsed = time.time() - start_time
-            logging.info(f"✅ AI RESPONSE: {model} | {trade_data.get('symbol')} | {elapsed:.2f}s")
+            logging.info(f"✅ GPT-OSS responded in {elapsed:.2f}s")
 
             message = response.choices[0].message
-            
-            # استخراج reasoning_content إن وجد (GPT-OSS)
             reasoning = getattr(message, "reasoning_content", None)
             if reasoning:
-                logging.info(f"🧠 Reasoning from {model}: {reasoning[:300]}...")
-            
-            raw = message.content
-            if not raw:
-                raise ValueError(f"AI returned empty content. model={model}")
-            
-            raw = raw.strip()
-            logging.info(f"📥 RAW AI ({model}): {raw[:500]}")
+                logging.info(f"🧠 GPT-OSS reasoning: {str(reasoning)[:200]}")
 
-            # إزالة Markdown fences
+            raw = (message.content or "").strip()
             if raw.startswith("```"):
                 lines = raw.splitlines()
-                lines = [line for line in lines if not line.strip().startswith("```")]
-                raw = "\n".join(lines).strip()
+                raw = "\n".join(line for line in lines if not line.strip().startswith("```")).strip()
 
             result = json.loads(raw)
 
-            # التحقق من الحقول المطلوبة
-            required = ["tp_probability", "sl_probability", "sideways_probability", 
-                       "reversal_probability", "recommendation", "confidence", "reason"]
-            missing = [field for field in required if field not in result]
-            if missing:
-                raise ValueError(f"Missing AI fields: {missing}")
+            # التحقق من القيم
+            tp = float(result.get("tp_probability", 0))
+            sl = float(result.get("sl_probability", 0))
+            sideways = float(result.get("sideways_probability", 0))
+            reversal = float(result.get("reversal_probability", 0))
+            total = tp + sl + sideways + reversal
+            if total <= 0:
+                raise ValueError("AI returned zero probabilities")
 
-            # تنظيف القيم
-            for key in ["tp_probability", "sl_probability", "sideways_probability", 
-                       "reversal_probability", "confidence"]:
-                result[key] = float(result[key])
+            # تطبيع الاحتمالات إلى 100
+            result["tp_probability"] = tp / total * 100
+            result["sl_probability"] = sl / total * 100
+            result["sideways_probability"] = sideways / total * 100
+            result["reversal_probability"] = reversal / total * 100
+            result["recommendation"] = str(result.get("recommendation", "HOLD")).upper()
+            result["confidence"] = float(result.get("confidence", 50))
+            result["reason"] = str(result.get("reason", ""))
 
-            # تطبيع الاحتمالات
-            total = (result["tp_probability"] + result["sl_probability"] + 
-                    result["sideways_probability"] + result["reversal_probability"])
-            if total > 0 and abs(total - 100) > 1:
-                result["tp_probability"] = (result["tp_probability"] / total) * 100
-                result["sl_probability"] = (result["sl_probability"] / total) * 100
-                result["sideways_probability"] = (result["sideways_probability"] / total) * 100
-                result["reversal_probability"] = (result["reversal_probability"] / total) * 100
-
-            logging.info(f"🎯 AI SUCCESS {model} | {trade_data.get('symbol')} | "
-                        f"{result.get('recommendation')} | confidence={result.get('confidence')}")
+            logging.info(f"🎯 GPT-OSS result {trade_data.get('symbol')} | {result['recommendation']} | confidence={result['confidence']:.0f}%")
             return result
 
         except Exception as e:
-            logging.error(
-                f"""
-╔══════════════════════════════════════════════════════╗
-❌ AI FAILURE
-Model: {model}
-Symbol: {trade_data.get('symbol')}
-Error Type: {type(e).__name__}
-Error: {str(e)}
-╚══════════════════════════════════════════════════════╝
-""",
-                exc_info=True
-            )
-            # 🔴 إرجاع ERROR بدلاً من HOLD 50%
+            logging.error(f"❌ GPT-OSS ERROR for {trade_data.get('symbol')}: {type(e).__name__}: {e}")
             return {
-                "tp_probability": 0,
-                "sl_probability": 0,
-                "sideways_probability": 0,
-                "reversal_probability": 0,
-                "recommendation": "ERROR",
+                "tp_probability": 50,
+                "sl_probability": 25,
+                "sideways_probability": 15,
+                "reversal_probability": 10,
+                "recommendation": "HOLD",
                 "confidence": 0,
-                "reason": f"AI ERROR: {type(e).__name__}: {str(e)[:100]}"
+                "reason": f"GPT-OSS unavailable: {type(e).__name__}"
             }
-
-    def get_recommendation(self, trade_data: Dict) -> Dict:
-        result1 = self._call_ai_with_probabilities(self.client_mistral, AI_MODEL, trade_data)
-        result = {
-            'recommendation': result1.get('recommendation', 'ERROR'),
-            'confidence': result1.get('confidence', 0),
-            'reason': result1.get('reason', ''),
-            'probability_tp': result1.get('tp_probability', 0),
-            'probability_sl': result1.get('sl_probability', 0),
-            'probability_sideways': result1.get('sideways_probability', 0),
-            'probability_reversal': result1.get('reversal_probability', 0),
-            'ai2_decision': '', 'ai2_confidence': 0, 'ai2_explanation': ''
-        }
-
-        if DUAL_AI_ENABLED and result1.get('recommendation') != 'ERROR':
-            result2 = self._call_ai_with_probabilities(self.client_oss, AI_MODEL_OSS, trade_data)
-            if result2.get('recommendation') != 'ERROR':
-                result['ai2_decision'] = result2.get('recommendation', 'ERROR')
-                result['ai2_confidence'] = result2.get('confidence', 0)
-                result['ai2_explanation'] = result2.get('reason', '')
-                
-                # إذا كان كلا النموذجين ناجحين، يمكن دمج النتائج
-                if result1.get('recommendation') != 'ERROR' and result2.get('recommendation') != 'ERROR':
-                    # زيادة الثقة عند الاتفاق
-                    if result1.get('recommendation') == result2.get('recommendation'):
-                        result['confidence'] = min(100, (result1.get('confidence', 0) + result2.get('confidence', 0)) / 2 + 10)
-                        result['probability_tp'] = (result1.get('tp_probability', 0) + result2.get('tp_probability', 0)) / 2
-                        result['probability_sl'] = (result1.get('sl_probability', 0) + result2.get('sl_probability', 0)) / 2
-                        result['probability_sideways'] = (result1.get('sideways_probability', 0) + result2.get('sideways_probability', 0)) / 2
-                        result['probability_reversal'] = (result1.get('reversal_probability', 0) + result2.get('reversal_probability', 0)) / 2
-                        result['reason'] = f"🤝 متفقتان: {result1.get('reason', '')}"
-
-        return result
 
 # =============================================================================
 # 📡 TELEGRAM BOT
 # =============================================================================
 
 class TelegramBot:
-    def __init__(self, token, admin_chat_id, monitor_db, analytics_engine):
+    def __init__(self, token, admin_chat_id, monitor_db, analytics_engine, ai_client):
         self.token = token
         self.admin_chat_id = admin_chat_id
         self.db = monitor_db
         self.analytics = analytics_engine
+        self.ai = ai_client
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("👋 مرحباً! أنا بوت مراقبة APEX v4.2.\nالأوامر:\n/positions - الصفقات المفتوحة\n/advice <id> - نصيحة للصفقة\n/market <symbol> - تحليل سريع لعملة\n/statistics - الإحصائيات")
+        await update.message.reply_text(
+            "👋 مرحباً! أنا بوت مراقبة APEX v4.3.\n"
+            "الأوامر:\n"
+            "/positions - عرض الصفقات المفتوحة\n"
+            "/advice <id> - تحليل فوري للصفقة (معرفها من /positions)\n"
+            "/market <symbol> - تحليل سريع لعملة\n"
+            "/statistics - إحصائيات الأداء"
+        )
 
     async def positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         trades = self.db.get_open_trades()
         if not trades:
             await update.message.reply_text("لا توجد صفقات مفتوحة حالياً. 💤")
             return
-            
+
         msg = "📊 <b>الصفقات المفتوحة</b>\n\n"
         for t in trades:
             trade_id = t.get('id', '?')
             symbol = str(t.get('symbol', 'UNKNOWN')).replace(':USDT', '')
             side = str(t.get('side', 'UNKNOWN'))
-            
             entry_price = round(float(t.get('entry_price') or 0), 6)
             sl_price = round(float(t.get('sl_price') or 0), 6)
             tp_price = round(float(t.get('tp_price') or 0), 6)
-            
             leverage = t.get('leverage_used', 1)
             slot = t.get('slot_used', '?')
             score = t.get('confidence', 0)
             regime = str(t.get('regime', 'غير محدد'))
             ai_exp = str(t.get('ai_explanation', '')).replace('<', '').replace('>', '')
-            
             direction_emoji = '🟢 LONG' if side == 'LONG' else '🔴 SHORT'
 
             msg += f"• <b>{symbol}</b> (ID: <code>{trade_id}</code>)\n"
@@ -509,7 +448,6 @@ class TelegramBot:
             msg += f"الدخول: <code>{entry_price}</code>\n"
             msg += f"الوقف: <code>{sl_price}</code> | الهدف: <code>{tp_price}</code>\n"
             msg += f"قوة الدخول: {score:.1f}/100 | السوق: {regime}\n"
-            
             if ai_exp:
                 msg += f"💬 <b>سبب الدخول (AI):</b> <i>{ai_exp}</i>\n"
 
@@ -525,7 +463,7 @@ class TelegramBot:
                 msg += f"\n⏳ <i>جاري جمع بيانات الحيتان والسيولة للمتابعة الحية...</i>\n"
 
             msg += "\n" + "─"*25 + "\n\n"
-            
+
         await update.message.reply_text(msg, parse_mode='HTML')
 
     async def advice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -537,53 +475,143 @@ class TelegramBot:
         except:
             await update.message.reply_text("المعرف غير صحيح.")
             return
-            
+
+        # 1. حاول جلب التحليل المخزن
         analysis = self.db.get_latest_open_analysis(trade_id)
-        if not analysis:
-            await update.message.reply_text("⏳ التحليل قيد التجهيز أو لم يتم العثور عليه، يرجى الانتظار دقيقة والمحاولة مجدداً.")
+        if analysis:
+            # يوجد تحليل مخزن، اعرضه فوراً
+            msg = self._format_analysis_response(trade_id, analysis)
+            await update.message.reply_text(msg, parse_mode='HTML')
             return
-            
+
+        # 2. لا يوجد تحليل مخزن، قم بتحليل فوري
+        await update.message.reply_text("⏳ جاري تحليل الصفقة فوراً...")
+        trade = self.db.get_trade_by_id(trade_id)
+        if not trade:
+            await update.message.reply_text("⚠️ لم يتم العثور على الصفقة.")
+            return
+
+        # تحليل فوري
+        try:
+            # جمع بيانات السوق
+            symbol = trade.get('symbol')
+            market_data = self.analytics.fetch_market_data(symbol)
+            if 'error' in market_data:
+                await update.message.reply_text(f"⚠️ خطأ في جلب بيانات السوق: {market_data['error']}")
+                return
+
+            # بناء بيانات trade_data مشابهة لما يفعله MonitorLoop
+            entry_price = float(trade.get('entry_price') or 0)
+            side = trade.get('side', '')
+            current_price = market_data.get('price', entry_price)
+            profit_pct = 0.0
+            if entry_price > 0:
+                if side == 'LONG':
+                    profit_pct = (current_price - entry_price) / entry_price * 100
+                else:
+                    profit_pct = (entry_price - current_price) / entry_price * 100
+
+            tp_price = float(trade.get('tp_price') or 0)
+            sl_price = float(trade.get('sl_price') or 0)
+            target_progress = 0.0
+            if tp_price > 0 and entry_price > 0 and (tp_price - entry_price) != 0:
+                if side == 'LONG':
+                    target_progress = (current_price - entry_price) / (tp_price - entry_price) * 100
+                else:
+                    target_progress = (entry_price - current_price) / (entry_price - tp_price) * 100
+                target_progress = max(0, min(100, target_progress))
+
+            ohlcv = market_data.get('ohlcv', [])
+            current_data = {
+                'symbol': symbol,
+                'side': side,
+                'entry_price': entry_price,
+                'current_price': current_price,
+                'tp_price': tp_price,
+                'sl_price': sl_price,
+                'profit_pct': profit_pct,
+                'target_progress': target_progress,
+                'trend_strength': self.analytics.trend_strength(ohlcv),
+                'momentum_score': self.analytics.momentum_score(ohlcv),
+                'funding_rate': self.analytics.funding_rate(symbol),
+                'oi_change_1h': self.analytics.oi_change_1h(symbol),
+                'market_regime': self.analytics.detect_market_regime(ohlcv)
+            }
+
+            # استدعاء AI
+            ai_result = self.ai.get_recommendation(current_data)
+
+            # حفظ التحليل في قاعدة البيانات
+            analysis_record = {
+                'trade_id': trade_id,
+                'symbol': symbol,
+                'side': side,
+                'entry_price': entry_price,
+                'current_price': current_price,
+                'profit_pct': profit_pct,
+                'time_open_minutes': 0,  # غير معروف هنا
+                'target_progress': target_progress,
+                'trend_strength': current_data['trend_strength'],
+                'momentum_score': current_data['momentum_score'],
+                'funding_rate': current_data['funding_rate'],
+                'oi_change_1h': current_data['oi_change_1h'],
+                'oi_trend': 0.0,
+                'apex_score': float(trade.get('confidence', 50)),
+                'iss_score': 50,
+                'ai_decision': ai_result.get('recommendation', 'HOLD'),
+                'ai_confidence': ai_result.get('confidence', 0),
+                'ai_explanation': ai_result.get('reason', ''),
+                'recommendation': ai_result.get('recommendation', 'HOLD'),
+                'probability_tp': ai_result.get('probability_tp', 0),
+                'probability_sl': ai_result.get('probability_sl', 0),
+                'probability_sideways': ai_result.get('probability_sideways', 0),
+                'probability_reversal': ai_result.get('probability_reversal', 0),
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+            self.db.save_open_analysis(analysis_record)
+
+            # عرض النتيجة
+            analysis = self.db.get_latest_open_analysis(trade_id)
+            if analysis:
+                msg = self._format_analysis_response(trade_id, analysis)
+            else:
+                msg = "⚠️ تعذر حفظ التحليل، حاول مرة أخرى."
+            await update.message.reply_text(msg, parse_mode='HTML')
+
+        except Exception as e:
+            logging.error(f"Advice error: {e}")
+            await update.message.reply_text(f"⚠️ حدث خطأ أثناء التحليل: {e}")
+
+    def _format_analysis_response(self, trade_id, analysis):
         msg = f"🔍 <b>توصية الصفقة #{trade_id}</b>\n"
         msg += f"العملة: {analysis.get('symbol', 'UNKNOWN')}\n"
         msg += f"الربح الحالي: {analysis.get('profit_pct', 0):+.2f}%\n"
         msg += f"نسبة تحقيق الهدف: {analysis.get('target_progress', 0):.1f}%\n"
-        
         msg += f"\n🎯 <b>الاحتمالات</b>\n"
         msg += f"  TP: {analysis.get('probability_tp', 0):.0f}%\n"
         msg += f"  SL: {analysis.get('probability_sl', 0):.0f}%\n"
         msg += f"  جانبي: {analysis.get('probability_sideways', 0):.0f}%\n"
         msg += f"  انعكاس: {analysis.get('probability_reversal', 0):.0f}%\n"
-        
         msg += f"\n🤖 توصية الذكاء الاصطناعي: <b>{analysis.get('recommendation', 'HOLD')}</b>\n"
         msg += f"الثقة: {analysis.get('ai_confidence', 0):.0f}%\n"
-        msg += f"السبب: <i>{analysis.get('ai_explanation', '')}</i>\n"
-        
-        if analysis.get('ai2_decision') and analysis.get('ai2_decision') != 'ERROR':
-            msg += f"\n🔄 النموذج الثاني (GPT-OSS):\n"
-            msg += f"  التوصية: {analysis['ai2_decision']}\n"
-            msg += f"  الثقة: {analysis['ai2_confidence']:.0f}%\n"
-            msg += f"  السبب: <i>{analysis['ai2_explanation']}</i>\n"
-            
-        await update.message.reply_text(msg, parse_mode='HTML')
+        msg += f"السبب: <i>{analysis.get('ai_explanation', '')}</i>"
+        return msg
 
     async def market(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
             await update.message.reply_text("يرجى إرسال اسم العملة: مثلاً /market BTC")
             return
-            
         symbol = context.args[0].upper()
         if not symbol.endswith('USDT'):
             symbol += 'USDT'
         symbol = f"{symbol}/USDT:USDT"
-        
+
         await update.message.reply_text(f"⏳ جاري الفحص المباشر لعملة {symbol}...")
-        
         try:
             market_data = self.analytics.analyze_market(symbol)
             if 'error' in market_data:
                 await update.message.reply_text(f"⚠️ خطأ في جلب بيانات {symbol}: {market_data['error']}")
                 return
-                
             msg = f"📊 <b>تحليل السوق المباشر - {symbol}</b>\n\n"
             msg += f"<b>بنية السوق:</b> {market_data.get('market_structure', 'N/A')}\n"
             msg += f"<b>السعر الحالي:</b> {market_data.get('price', 0)}\n"
@@ -607,7 +635,7 @@ class TelegramBot:
         self.app.run_polling()
 
 # =============================================================================
-# 🔁 MONITOR LOOP (قوي ولا يتجمد)
+# 🔁 MONITOR LOOP
 # =============================================================================
 
 class MonitorLoop:
@@ -657,19 +685,17 @@ class MonitorLoop:
         tp_price = float(trade.get('tp_price') or 0)
         sl_price = float(trade.get('sl_price') or 0)
 
-        # 🔴 جلب بيانات السوق مع التخزين المؤقت
+        # جلب بيانات السوق
         market_data = self.market_cache.get(symbol, {}).get('data', {})
         if not market_data or time.time() - self.market_cache.get(symbol, {}).get('time', 0) > 300:
             market_data = self.analytics.analyze_market(symbol)
             self.market_cache[symbol] = {'data': market_data, 'time': time.time()}
 
-        # 🔴 إذا فشل جلب بيانات السوق، تخطي التحليل بالكامل
         if 'error' in market_data:
             logging.error(f"⛔ Skipping AI for {symbol}: {market_data['error']}")
             return
 
         current_price = market_data.get('price', entry_price)
-        
         if entry_price > 0:
             if side == 'LONG':
                 profit_pct = (current_price - entry_price) / entry_price * 100
@@ -715,7 +741,6 @@ class MonitorLoop:
             'market_regime': market_regime
         }
 
-        # الاتصال بالذكاء الاصطناعي
         ai_result = self.ai.get_recommendation(current_data)
 
         analysis_record = {
@@ -734,20 +759,16 @@ class MonitorLoop:
             'oi_trend': 0.0,
             'apex_score': current_data['apex_score'],
             'iss_score': 50,
-            'ai_decision': ai_result.get('recommendation', 'ERROR'),
+            'ai_decision': ai_result.get('recommendation', 'HOLD'),
             'ai_confidence': ai_result.get('confidence', 0),
             'ai_explanation': ai_result.get('reason', ''),
-            'ai2_decision': ai_result.get('ai2_decision', ''),
-            'ai2_confidence': ai_result.get('ai2_confidence', 0),
-            'ai2_explanation': ai_result.get('ai2_explanation', ''),
-            'recommendation': ai_result.get('recommendation', 'ERROR'),
+            'recommendation': ai_result.get('recommendation', 'HOLD'),
             'probability_tp': ai_result.get('probability_tp', 0),
             'probability_sl': ai_result.get('probability_sl', 0),
             'probability_sideways': ai_result.get('probability_sideways', 0),
             'probability_reversal': ai_result.get('probability_reversal', 0),
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
-        
         self.db.save_open_analysis(analysis_record)
         logging.info(f"✅ Analysis Saved for {symbol}")
 
@@ -757,16 +778,16 @@ class MonitorLoop:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-    logging.info("🚀 Starting APEX Monitor Bot v4.2")
+    logging.info("🚀 Starting APEX Monitor Bot v4.3 (Single AI Model)")
 
     exchange_public = ccxt.binance({
-        "enableRateLimit": True, 
+        "enableRateLimit": True,
         "options": {
             "defaultType": "swap",
-            "adjustForTimeDifference": True 
+            "adjustForTimeDifference": True
         }
     })
-    
+
     try:
         exchange_public.load_markets()
     except Exception as e:
@@ -774,12 +795,12 @@ def main():
 
     db = MonitorDB(MONITOR_DB_PATH)
     analytics = AdvancedAnalyticsEngine(exchange_public)
-    ai = AIClient()  # 🔴 سيتم عرض النماذج المتاحة تلقائياً
+    ai = AIClient()
 
     monitor = MonitorLoop(db, analytics, ai)
     monitor.start()
 
-    telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db, analytics)
+    telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db, analytics, ai)
     telegram_bot.run()
 
 if __name__ == "__main__":
