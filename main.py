@@ -159,33 +159,63 @@ class MonitorDB:
             return {}
 
     def save_open_analysis(self, data: Dict[str, Any]):
+        # تعريف الأعمدة بالقيمة المطلوبة
+        columns = [
+            "trade_id", "symbol", "side", "entry_price", "current_price",
+            "profit_pct", "time_open_minutes", "target_progress",
+            "trend_strength", "momentum_score", "funding_rate",
+            "oi_change_1h", "oi_trend", "apex_score", "iss_score",
+            "ai_decision", "ai_confidence", "ai_explanation",
+            "recommendation", "probability_tp", "probability_sl",
+            "probability_sideways", "probability_reversal", "timestamp"
+        ]
+        # تجميع القيم بنفس الترتيب
+        values = [
+            data.get("trade_id"),
+            data.get("symbol"),
+            data.get("side"),
+            data.get("entry_price"),
+            data.get("current_price"),
+            data.get("profit_pct"),
+            data.get("time_open_minutes"),
+            data.get("target_progress"),
+            data.get("trend_strength"),
+            data.get("momentum_score"),
+            data.get("funding_rate"),
+            data.get("oi_change_1h"),
+            data.get("oi_trend"),
+            data.get("apex_score"),
+            data.get("iss_score"),
+            data.get("ai_decision"),
+            data.get("ai_confidence"),
+            data.get("ai_explanation"),
+            data.get("recommendation"),
+            data.get("probability_tp", 0),
+            data.get("probability_sl", 0),
+            data.get("probability_sideways", 0),
+            data.get("probability_reversal", 0),
+            data.get("timestamp")
+        ]
+        # التأكد من تطابق العدد
+        if len(columns) != len(values):
+            error_msg = f"DB mapping mismatch: {len(columns)} columns vs {len(values)} values"
+            logging.error(error_msg)
+            raise RuntimeError(error_msg)
+        # توليد علامات الاستفهام
+        placeholders = ",".join(["?"] * len(values))
         with self.lock:
             try:
-                self.monitor_conn.execute("""
+                self.monitor_conn.execute(
+                    f"""
                     INSERT INTO open_analysis (
-                        trade_id, symbol, side, entry_price, current_price,
-                        profit_pct, time_open_minutes, target_progress,
-                        trend_strength, momentum_score, funding_rate,
-                        oi_change_1h, oi_trend, apex_score, iss_score,
-                        ai_decision, ai_confidence, ai_explanation,
-                        recommendation, probability_tp, probability_sl,
-                        probability_sideways, probability_reversal, timestamp
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    data.get('trade_id'), data.get('symbol'), data.get('side'),
-                    data.get('entry_price'), data.get('current_price'), data.get('profit_pct'),
-                    data.get('time_open_minutes'), data.get('target_progress'),
-                    data.get('trend_strength'), data.get('momentum_score'), data.get('funding_rate'),
-                    data.get('oi_change_1h'), data.get('oi_trend'), data.get('apex_score'),
-                    data.get('iss_score'), data.get('ai_decision'), data.get('ai_confidence'),
-                    data.get('ai_explanation'), data.get('recommendation'),
-                    data.get('probability_tp', 0), data.get('probability_sl', 0),
-                    data.get('probability_sideways', 0), data.get('probability_reversal', 0),
-                    data.get('timestamp')
-                ))
+                        {",".join(columns)}
+                    ) VALUES ({placeholders})
+                    """,
+                    values
+                )
                 self.monitor_conn.commit()
             except Exception as e:
-                logging.error(f"DB Save Error: {e}\n{traceback.format_exc()}")
+                logging.error(f"DB Save Error: {e}\nColumns: {len(columns)} | Values: {len(values)}\n{traceback.format_exc()}")
 
     def get_latest_open_analysis(self, trade_id: int) -> Dict:
         with self.lock:
