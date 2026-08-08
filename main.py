@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     APEX MONITOR BOT — Telegram AI Monitor v4.0            ║
+║     APEX MONITOR BOT — Telegram AI Monitor v4.1            ║
 ║  Architecture: Monitor & Analysis Only (No Execution)      ║
 ║  No local trades DB, reads from APEX API only             ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -1167,61 +1167,71 @@ RSI: {market_data.get('rsi', 50):.1f}
         return result
 
 # =============================================================================
-# 📡 TELEGRAM BOT (موسع)
+# 📡 TELEGRAM BOT (موسع) - مع تمرير محرك التحليل
 # =============================================================================
 
 class TelegramBot:
-    def __init__(self, token, admin_chat_id, monitor_db):
+    def __init__(self, token, admin_chat_id, monitor_db, analytics_engine):
         self.token = token
         self.admin_chat_id = admin_chat_id
         self.db = monitor_db
+        self.analytics = analytics_engine  # 🔴 أضفنا محرك التحليل هنا
         self.app = None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "👋 مرحباً! أنا بوت مراقبة APEX v4.0.\n"
-            "✨ تحليل السوق المتقدم: بنية السوق، السيولة، تدفق الأوامر، الحيتان\n"
+            "👋 مرحباً! أنا بوت مراقبة APEX v4.1 (النسخة السريعة).\n"
             "الأوامر المتاحة:\n"
             "/positions - عرض الصفقات المفتوحة مع التوصيات\n"
-            "/advice - الحصول على توصية لصفقة محددة (أرسل المعرف)\n"
+            "/advice <id> - الحصول على توصية لصفقة محددة (أرسل المعرف)\n"
             "/statistics - إحصائيات الأداء\n"
-            "/lessons - عرض الدروس المستفادة\n"
-            "/confusion - عرض مصفوفة الارتباك\n"
-            "/market - تحليل السوق الحالي لعملة معينة\n"
+            "/market <symbol> - تحليل أي عملة (مثال: /market BTC)\n"
             "/help - هذه الرسالة"
         )
 
+    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self.start(update, context)
+
+    # =====================================================================
+    # 🔹 دالة market – تحليل مباشر (Live) بدلاً من الذاكرة المؤقتة
+    # =====================================================================
     async def market(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
-            await update.message.reply_text("يرجى إرسال اسم العملة: /market BTC")
+            await update.message.reply_text("يرجى إرسال اسم العملة: مثلاً /market BTC")
             return
         symbol = context.args[0].upper()
         if not symbol.endswith('USDT'):
             symbol += 'USDT'
         symbol = f"{symbol}/USDT:USDT"
+        await update.message.reply_text(f"⏳ جاري الفحص والتحليل المباشر لعملة {symbol}...")
+
         try:
-            market_data = context.bot_data.get('market_analysis', {}).get(symbol, {})
-            if not market_data:
-                await update.message.reply_text("لم يتم العثور على تحليل لهذه العملة.")
+            # 🔴 استدعاء التحليل المباشر بدلاً من البحث في الذاكرة
+            market_data = self.analytics.analyze_market(symbol)
+            if 'error' in market_data:
+                await update.message.reply_text(f"⚠️ خطأ في جلب بيانات {symbol}: {market_data['error']}")
                 return
-            msg = f"📊 **تحليل السوق - {symbol}**\n\n"
-            msg += f"**بنية السوق:** {market_data.get('market_structure', 'N/A')}\n"
-            msg += f"**اختراق:** {'✅' if market_data.get('breakout', False) else '❌'}\n"
-            msg += f"**فيك أوت:** {'⚠️' if market_data.get('fakeout', False) else '✅'}\n"
-            msg += f"**عدم توازن السيولة:** {market_data.get('liquidity_imbalance', 0):.2f}\n"
-            msg += f"**عدم توازن تدفق الأوامر:** {market_data.get('order_flow_imbalance', 0):.2f}\n"
-            msg += f"**CVD:** {market_data.get('cvd', 0):.0f} ({'📈' if market_data.get('cvd_trend', 0) > 0 else '📉'})\n"
-            msg += f"**نشاط الحيتان:** {'🐋' * market_data.get('whale_activity', 0)}\n"
-            msg += f"**Fear & Greed:** {market_data.get('fear_greed', 50)}/100\n"
-            msg += f"**ارتباط BTC:** {market_data.get('btc_correlation', 0.5):.2f}\n"
-            msg += f"**الجلسة:** {market_data.get('session', 'N/A')}\n"
-            msg += f"**RSI:** {market_data.get('rsi', 50):.1f}\n"
-            await update.message.reply_text(msg, parse_mode='Markdown')
+
+            msg = f"📊 <b>تحليل السوق المباشر - {symbol}</b>\n\n"
+            msg += f"<b>السعر الحالي:</b> {market_data.get('price', 0):.4f}\n"
+            msg += f"<b>بنية السوق:</b> {market_data.get('market_structure', 'N/A')}\n"
+            msg += f"<b>اختراق:</b> {'✅' if market_data.get('breakout', False) else '❌'}\n"
+            msg += f"<b>فيك أوت:</b> {'⚠️' if market_data.get('fakeout', False) else '✅'}\n"
+            msg += f"<b>عدم توازن السيولة:</b> {market_data.get('liquidity_imbalance', 0):.2f}\n"
+            msg += f"<b>عدم توازن تدفق الأوامر:</b> {market_data.get('order_flow_imbalance', 0):.2f}\n"
+            msg += f"<b>CVD:</b> {market_data.get('cvd', 0):.0f} ({'📈' if market_data.get('cvd_trend', 0) > 0 else '📉'})\n"
+            msg += f"<b>نشاط الحيتان:</b> {'🐋' * market_data.get('whale_activity', 0)}\n"
+            msg += f"<b>Fear & Greed:</b> {market_data.get('fear_greed', 50)}/100\n"
+            msg += f"<b>ارتباط BTC:</b> {market_data.get('btc_correlation', 0.5):.2f}\n"
+            msg += f"<b>الجلسة:</b> {market_data.get('session', 'N/A')}\n"
+            msg += f"<b>RSI:</b> {market_data.get('rsi', 50):.1f}\n"
+            await update.message.reply_text(msg, parse_mode='HTML')
+
         except Exception as e:
-            await update.message.reply_text(f"خطأ في جلب التحليل: {e}")
+            await update.message.reply_text(f"⚠️ حدث خطأ غير متوقع: {e}")
 
     # =====================================================================
-    # 🔹 الدالة المعدلة positions – تستخدم HTML بدلاً من Markdown مع تنظيف النصوص
+    # 🔹 دالة positions – مع إظهار trade_id
     # =====================================================================
     async def positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         trades = self.db.get_open_trades()
@@ -1275,7 +1285,8 @@ class TelegramBot:
         await update.message.reply_text(msg, parse_mode='HTML')
 
     # =====================================================================
-
+    # 🔹 advice – استخدم المعرف
+    # =====================================================================
     async def advice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
             await update.message.reply_text("يرجى إرسال معرف الصفقة: /advice <id>")
@@ -1315,8 +1326,10 @@ class TelegramBot:
             msg += f"  السبب: {analysis['ai2_explanation']}\n"
         await update.message.reply_text(msg, parse_mode='Markdown')
 
+    # =====================================================================
+    # 🔹 statistics – من API
+    # =====================================================================
     async def statistics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # استخدام الدالة الجديدة get_statistics() التي تجلب من API
         stats = self.db.get_statistics()
         if not stats:
             await update.message.reply_text("لا توجد إحصائيات متاحة حالياً.")
@@ -1328,41 +1341,10 @@ class TelegramBot:
         msg += f"إجمالي الربح: {stats.get('total_pnl', 0):.2f} USDT\n"
         await update.message.reply_text(msg, parse_mode='Markdown')
 
-    async def lessons(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        lessons = self.db.get_lessons(limit=20)
-        if not lessons:
-            await update.message.reply_text("لا توجد دروس مستفادة بعد.")
-            return
-        msg = "📚 **الدروس المستفادة**\n\n"
-        for l in lessons[:10]:
-            msg += f"• {l['symbol']} | {l['market_regime']}\n"
-            msg += f"  APEX: {l['apex_decision']} ({l['apex_pnl']:+.2f}%)\n"
-            msg += f"  AI: {l['ai_decision']} ({l['ai_pnl']:+.2f}%)\n"
-            msg += f"  الأفضل: {l['best_decision']}\n"
-            msg += f"  الدرس: {l['lesson'][:100]}...\n\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-
-    async def confusion(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        cursor = self.db.monitor_conn.execute("""
-            SELECT system_name, precision, recall, f1_score, timestamp
-            FROM confusion_matrix
-            ORDER BY timestamp DESC
-        """)
-        rows = cursor.fetchall()
-        if not rows:
-            await update.message.reply_text("لا توجد بيانات كافية لمصفوفة الارتباك.")
-            return
-        msg = "📊 **مصفوفة الارتباك (أحدث القيم)**\n\n"
-        for row in rows[:5]:
-            msg += f"**{row[0]}**\n"
-            msg += f"  Precision: {row[1]:.2f}\n"
-            msg += f"  Recall: {row[2]:.2f}\n"
-            msg += f"  F1 Score: {row[3]:.2f}\n"
-            msg += f"  {row[4][:19]}\n\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-
-    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self.start(update, context)
+    # =====================================================================
+    # 🔹 تم إزالة أوامر /lessons و /confusion لأنها غير مستخدمة حالياً
+    # (يمكن إضافتها لاحقاً إذا رغبت)
+    # =====================================================================
 
     def run(self):
         self.app = Application.builder().token(self.token).build()
@@ -1370,11 +1352,10 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("positions", self.positions))
         self.app.add_handler(CommandHandler("advice", self.advice))
         self.app.add_handler(CommandHandler("statistics", self.statistics))
-        self.app.add_handler(CommandHandler("lessons", self.lessons))
-        self.app.add_handler(CommandHandler("confusion", self.confusion))
         self.app.add_handler(CommandHandler("market", self.market))
         self.app.add_handler(CommandHandler("help", self.help))
         self.app.run_polling()
+
 
 # =============================================================================
 # 🔁 MONITOR LOOP
@@ -1490,7 +1471,7 @@ class MonitorLoop:
         target_progress = max(0, min(100, target_progress))
 
         ohlcv = market.get('ohlcv', [])
-        # 🔴 أضف هذا السطر لحماية البوت من الانهيار إذا لم ترجع الشموع
+        # 🔴 حماية من انهيار الذكاء الاصطناعي عند نقص البيانات
         if not ohlcv or len(ohlcv) < 5:
             logger.warning(f"No sufficient OHLCV data for {symbol}, skipping analysis.")
             return
@@ -1614,6 +1595,7 @@ class MonitorLoop:
     def _update_system_performance(self):
         pass
 
+
 # =============================================================================
 # 🚀 MAIN
 # =============================================================================
@@ -1635,7 +1617,7 @@ def main():
     )
     global logger
     logger = logging.getLogger("MONITOR")
-    logger.info("🚀 Starting APEX Monitor Bot v4.0 (Lightweight)")
+    logger.info("🚀 Starting APEX Monitor Bot v4.1 (Lightweight with Live Market)")
     logger.info("📊 Enhanced with: Market Structure, Liquidity Analysis, Order Flow, Whale Detection, Probability Engine")
     logger.info("📰 News API: ee6adc6bb00849d5bb0b1a29e62d5ed4")
     logger.info("🤖 AI Models: Mistral + GPT-OSS-120b")
@@ -1659,7 +1641,8 @@ def main():
 
     ai = AIClient(db)
 
-    telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db)
+    # 🔴 تمرير analytics إلى TelegramBot
+    telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db, analytics)
 
     monitor = MonitorLoop(db, analytics, ai, telegram_bot)
     monitor.start()
