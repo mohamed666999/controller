@@ -161,6 +161,7 @@ class MonitorDB:
     def save_open_analysis(self, data: Dict[str, Any]):
         with self.lock:
             try:
+                # 🔴 تم تصحيح عدد الـ ? إلى 24 (بعد إزالة عمود id)
                 self.monitor_conn.execute("""
                     INSERT INTO open_analysis (
                         trade_id, symbol, side, entry_price, current_price,
@@ -170,7 +171,7 @@ class MonitorDB:
                         ai_decision, ai_confidence, ai_explanation,
                         recommendation, probability_tp, probability_sl,
                         probability_sideways, probability_reversal, timestamp
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     data.get('trade_id'), data.get('symbol'), data.get('side'),
                     data.get('entry_price'), data.get('current_price'), data.get('profit_pct'),
@@ -201,8 +202,6 @@ class MonitorDB:
 
     def get_trade_by_id(self, trade_id: int) -> Dict:
         """جلب تفاصيل الصفقة من قاعدة البيانات (في حال الحاجة لتحليل فوري)"""
-        # نفترض أن جدول trades موجود في البوت الأول، ولكننا نعتمد على API
-        # هذه الدالة لتوافق مع منطق /advice الفوري
         trades = self.get_open_trades()
         for t in trades:
             if t.get('id') == trade_id:
@@ -563,10 +562,11 @@ class TelegramBot:
                 'ai_confidence': ai_result.get('confidence', 0),
                 'ai_explanation': ai_result.get('reason', ''),
                 'recommendation': ai_result.get('recommendation', 'HOLD'),
-                'probability_tp': ai_result.get('probability_tp', 0),
-                'probability_sl': ai_result.get('probability_sl', 0),
-                'probability_sideways': ai_result.get('probability_sideways', 0),
-                'probability_reversal': ai_result.get('probability_reversal', 0),
+                # 🔴 تصحيح أسماء الحقول لتطابق ما يخرجه الـ AI
+                'probability_tp': ai_result.get('tp_probability', 0),
+                'probability_sl': ai_result.get('sl_probability', 0),
+                'probability_sideways': ai_result.get('sideways_probability', 0),
+                'probability_reversal': ai_result.get('reversal_probability', 0),
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
             self.db.save_open_analysis(analysis_record)
@@ -764,10 +764,11 @@ class MonitorLoop:
             'ai_confidence': ai_result.get('confidence', 0),
             'ai_explanation': ai_result.get('reason', ''),
             'recommendation': ai_result.get('recommendation', 'HOLD'),
-            'probability_tp': ai_result.get('probability_tp', 0),
-            'probability_sl': ai_result.get('probability_sl', 0),
-            'probability_sideways': ai_result.get('probability_sideways', 0),
-            'probability_reversal': ai_result.get('probability_reversal', 0),
+            # 🔴 تصحيح أسماء الحقول لتطابق ما يخرجه الـ AI
+            'probability_tp': ai_result.get('tp_probability', 0),
+            'probability_sl': ai_result.get('sl_probability', 0),
+            'probability_sideways': ai_result.get('sideways_probability', 0),
+            'probability_reversal': ai_result.get('reversal_probability', 0),
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
         self.db.save_open_analysis(analysis_record)
