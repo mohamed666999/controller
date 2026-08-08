@@ -1246,7 +1246,7 @@ class TelegramBot:
             
             direction_emoji = '🟢 LONG' if side == 'LONG' else '🔴 SHORT'
 
-                        # استخراج معرف الصفقة
+            # استخراج معرف الصفقة
             trade_id = t.get('id', '?')
 
             # إضافة المعرف (ID) بجانب اسم العملة
@@ -1255,7 +1255,6 @@ class TelegramBot:
             msg += f"الدخول: <code>{entry_price}</code>\n"
             msg += f"الوقف: <code>{sl_price}</code> | الهدف: <code>{tp_price}</code>\n"
             msg += f"قوة الدخول: {score:.1f}/100 | السوق: {regime}\n"
-
             
             if ai_exp:
                 msg += f"💬 <b>سبب الدخول (AI):</b> <i>{ai_exp}</i>\n"
