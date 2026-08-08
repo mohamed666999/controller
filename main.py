@@ -289,28 +289,52 @@ class AdvancedAnalyticsEngine:
         }
 
 # =============================================================================
-# 🤖 AI CLIENT (مع النموذج الجديد)
+# 🤖 AI CLIENT (المطور مع كشف الأخطاء الكامل)
 # =============================================================================
 
 class AIClient:
     def __init__(self):
-        # 🔴 النموذج الأول (Mistral) - كما هو
         self.client_mistral = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
             api_key=NVIDIA_API_KEY
         )
-        # 🔴 النموذج الثاني (GPT-OSS-120b) - النموذج الجديد
         self.client_oss = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
             api_key=NVIDIA_API_KEY_OSS
         )
+        # 🔴 التحقق من النماذج المتاحة فور الإنشاء
+        self._check_models()
+
+    def _check_models(self):
+        """عرض النماذج المتاحة في الـ endpoint"""
+        for name, client in [("MISTRAL", self.client_mistral), ("GPT-OSS", self.client_oss)]:
+            try:
+                models = client.models.list()
+                ids = [m.id for m in models.data]
+                logging.info(f"📋 {name} AVAILABLE MODELS: {ids[:30]}")
+            except Exception as e:
+                logging.error(f"❌ {name} MODEL LIST ERROR: {type(e).__name__}: {e}", exc_info=True)
 
     def _call_ai_with_probabilities(self, client, model, trade_data):
-        prompt = f"""أنت خبير تداول ذكي. حلل بيانات الصفقة وأعط احتمالات الأهداف:
-العملة: {trade_data['symbol']} | الدخول: {trade_data['entry_price']} | الربح الحالي: {trade_data['profit_pct']:.2f}%
-الزخم: {trade_data['momentum_score']:.1f} | السوق: {trade_data['market_regime']}
+        """استدعاء AI مع كشف كامل للأخطاء"""
+        prompt = f"""أنت محلل تداول كمي. حلل الصفقة التالية:
 
-أجب بصيغة JSON فقط:
+العملة: {trade_data.get('symbol')}
+الاتجاه: {trade_data.get('side', 'UNKNOWN')}
+سعر الدخول: {trade_data.get('entry_price', 0)}
+السعر الحالي: {trade_data.get('current_price', 0)}
+هدف الربح (TP): {trade_data.get('tp_price', 0)}
+وقف الخسارة (SL): {trade_data.get('sl_price', 0)}
+الربح الحالي: {trade_data.get('profit_pct', 0):.2f}%
+نسبة تحقيق الهدف: {trade_data.get('target_progress', 0):.1f}%
+قوة الاتجاه: {trade_data.get('trend_strength', 0):.1f}
+الزخم / RSI التقريبي: {trade_data.get('momentum_score', 50):.1f}
+Funding Rate: {trade_data.get('funding_rate', 0):.6f}
+تغير OI خلال ساعة: {trade_data.get('oi_change_1h', 0):.4f}
+حالة السوق: {trade_data.get('market_regime', 'UNKNOWN')}
+
+أعطني تقييماً احتماليًا للصفقة. يجب أن يكون مجموع الاحتمالات 100%.
+أجب JSON فقط بدون Markdown:
 {{
     "tp_probability": 65,
     "sl_probability": 20,
@@ -322,45 +346,124 @@ class AIClient:
 }}
 """
         try:
+            logging.info(f"🤖 Calling AI: {model} | {trade_data.get('symbol')}")
+            start_time = time.time()
+            
             response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.4,
-                max_tokens=300,
-                timeout=15.0
+                messages=[
+                    {"role": "system", "content": "You are a quantitative trading analyst. Return valid JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=400,
+                timeout=30.0
             )
+            elapsed = time.time() - start_time
+            logging.info(f"✅ AI RESPONSE: {model} | {trade_data.get('symbol')} | {elapsed:.2f}s")
+
+            message = response.choices[0].message
             
-            # 🔴 استخراج reasoning_content إن وجد (لـ GPT-OSS-120b)
-            reasoning = getattr(response.choices[0].message, "reasoning_content", None)
+            # استخراج reasoning_content إن وجد (GPT-OSS)
+            reasoning = getattr(message, "reasoning_content", None)
             if reasoning:
-                logging.info(f"🧠 AI Reasoning ({model}): {reasoning[:100]}...")
+                logging.info(f"🧠 Reasoning from {model}: {reasoning[:300]}...")
             
-            raw = response.choices[0].message.content.strip()
+            raw = message.content
+            if not raw:
+                raise ValueError(f"AI returned empty content. model={model}")
+            
+            raw = raw.strip()
+            logging.info(f"📥 RAW AI ({model}): {raw[:500]}")
+
+            # إزالة Markdown fences
             if raw.startswith("```"):
-                raw = "\n".join([l for l in raw.split("\n") if not l.strip().startswith("```")])
-            res = json.loads(raw)
-            return res
+                lines = raw.splitlines()
+                lines = [line for line in lines if not line.strip().startswith("```")]
+                raw = "\n".join(lines).strip()
+
+            result = json.loads(raw)
+
+            # التحقق من الحقول المطلوبة
+            required = ["tp_probability", "sl_probability", "sideways_probability", 
+                       "reversal_probability", "recommendation", "confidence", "reason"]
+            missing = [field for field in required if field not in result]
+            if missing:
+                raise ValueError(f"Missing AI fields: {missing}")
+
+            # تنظيف القيم
+            for key in ["tp_probability", "sl_probability", "sideways_probability", 
+                       "reversal_probability", "confidence"]:
+                result[key] = float(result[key])
+
+            # تطبيع الاحتمالات
+            total = (result["tp_probability"] + result["sl_probability"] + 
+                    result["sideways_probability"] + result["reversal_probability"])
+            if total > 0 and abs(total - 100) > 1:
+                result["tp_probability"] = (result["tp_probability"] / total) * 100
+                result["sl_probability"] = (result["sl_probability"] / total) * 100
+                result["sideways_probability"] = (result["sideways_probability"] / total) * 100
+                result["reversal_probability"] = (result["reversal_probability"] / total) * 100
+
+            logging.info(f"🎯 AI SUCCESS {model} | {trade_data.get('symbol')} | "
+                        f"{result.get('recommendation')} | confidence={result.get('confidence')}")
+            return result
+
         except Exception as e:
-            logging.error(f"AI Timeout/Error ({model}): {str(e)[:50]}")
-            return {"tp_probability": 50, "sl_probability": 25, "sideways_probability": 15, "reversal_probability": 10, "recommendation": "HOLD", "confidence": 50, "reason": "تحليل غير متاح حالياً بسبب تأخر السيرفر"}
+            logging.error(
+                f"""
+╔══════════════════════════════════════════════════════╗
+❌ AI FAILURE
+Model: {model}
+Symbol: {trade_data.get('symbol')}
+Error Type: {type(e).__name__}
+Error: {str(e)}
+╚══════════════════════════════════════════════════════╝
+""",
+                exc_info=True
+            )
+            # 🔴 إرجاع ERROR بدلاً من HOLD 50%
+            return {
+                "tp_probability": 0,
+                "sl_probability": 0,
+                "sideways_probability": 0,
+                "reversal_probability": 0,
+                "recommendation": "ERROR",
+                "confidence": 0,
+                "reason": f"AI ERROR: {type(e).__name__}: {str(e)[:100]}"
+            }
 
     def get_recommendation(self, trade_data: Dict) -> Dict:
         result1 = self._call_ai_with_probabilities(self.client_mistral, AI_MODEL, trade_data)
         result = {
-            'recommendation': result1.get('recommendation', 'HOLD'),
-            'confidence': result1.get('confidence', 50),
+            'recommendation': result1.get('recommendation', 'ERROR'),
+            'confidence': result1.get('confidence', 0),
             'reason': result1.get('reason', ''),
-            'probability_tp': result1.get('tp_probability', 50),
-            'probability_sl': result1.get('sl_probability', 25),
-            'probability_sideways': result1.get('sideways_probability', 15),
-            'probability_reversal': result1.get('reversal_probability', 10),
+            'probability_tp': result1.get('tp_probability', 0),
+            'probability_sl': result1.get('sl_probability', 0),
+            'probability_sideways': result1.get('sideways_probability', 0),
+            'probability_reversal': result1.get('reversal_probability', 0),
             'ai2_decision': '', 'ai2_confidence': 0, 'ai2_explanation': ''
         }
-        if DUAL_AI_ENABLED:
+
+        if DUAL_AI_ENABLED and result1.get('recommendation') != 'ERROR':
             result2 = self._call_ai_with_probabilities(self.client_oss, AI_MODEL_OSS, trade_data)
-            result['ai2_decision'] = result2.get('recommendation', 'HOLD')
-            result['ai2_confidence'] = result2.get('confidence', 50)
-            result['ai2_explanation'] = result2.get('reason', '')
+            if result2.get('recommendation') != 'ERROR':
+                result['ai2_decision'] = result2.get('recommendation', 'ERROR')
+                result['ai2_confidence'] = result2.get('confidence', 0)
+                result['ai2_explanation'] = result2.get('reason', '')
+                
+                # إذا كان كلا النموذجين ناجحين، يمكن دمج النتائج
+                if result1.get('recommendation') != 'ERROR' and result2.get('recommendation') != 'ERROR':
+                    # زيادة الثقة عند الاتفاق
+                    if result1.get('recommendation') == result2.get('recommendation'):
+                        result['confidence'] = min(100, (result1.get('confidence', 0) + result2.get('confidence', 0)) / 2 + 10)
+                        result['probability_tp'] = (result1.get('tp_probability', 0) + result2.get('tp_probability', 0)) / 2
+                        result['probability_sl'] = (result1.get('sl_probability', 0) + result2.get('sl_probability', 0)) / 2
+                        result['probability_sideways'] = (result1.get('sideways_probability', 0) + result2.get('sideways_probability', 0)) / 2
+                        result['probability_reversal'] = (result1.get('reversal_probability', 0) + result2.get('reversal_probability', 0)) / 2
+                        result['reason'] = f"🤝 متفقتان: {result1.get('reason', '')}"
+
         return result
 
 # =============================================================================
@@ -455,7 +558,7 @@ class TelegramBot:
         msg += f"الثقة: {analysis.get('ai_confidence', 0):.0f}%\n"
         msg += f"السبب: <i>{analysis.get('ai_explanation', '')}</i>\n"
         
-        if analysis.get('ai2_decision'):
+        if analysis.get('ai2_decision') and analysis.get('ai2_decision') != 'ERROR':
             msg += f"\n🔄 النموذج الثاني (GPT-OSS):\n"
             msg += f"  التوصية: {analysis['ai2_decision']}\n"
             msg += f"  الثقة: {analysis['ai2_confidence']:.0f}%\n"
@@ -551,109 +654,54 @@ class MonitorLoop:
         symbol = trade.get('symbol', '')
         entry_price = float(trade.get('entry_price') or 0)
         side = trade.get('side', '')
+        tp_price = float(trade.get('tp_price') or 0)
+        sl_price = float(trade.get('sl_price') or 0)
 
-        # 🔴 الحماية من خطأ الماركت داتا (حتى لا يتخطاها بصمت)
+        # 🔴 جلب بيانات السوق مع التخزين المؤقت
         market_data = self.market_cache.get(symbol, {}).get('data', {})
         if not market_data or time.time() - self.market_cache.get(symbol, {}).get('time', 0) > 300:
             market_data = self.analytics.analyze_market(symbol)
             self.market_cache[symbol] = {'data': market_data, 'time': time.time()}
 
+        # 🔴 إذا فشل جلب بيانات السوق، تخطي التحليل بالكامل
         if 'error' in market_data:
-            logging.error(f"❌ خطأ جلب بيانات {symbol}: {market_data['error']}")
-            # نضع بيانات فارغة لكي لا يتجمد وتختفي ⏳
-            current_price = entry_price
-            profit_pct = 0.0
-            market_regime = "ERROR"
-        else:
-            current_price = market_data.get('price', entry_price)
-            if entry_price > 0:
-                profit_pct = ((current_price - entry_price) / entry_price * 100) if side == 'LONG' else ((entry_price - current_price) / entry_price * 100)
-            else:
-                profit_pct = 0.0
-            market_regime = market_data.get('market_structure', 'UNKNOWN')
+            logging.error(f"⛔ Skipping AI for {symbol}: {market_data['error']}")
+            return
+
+        current_price = market_data.get('price', entry_price)
         
+        if entry_price > 0:
+            if side == 'LONG':
+                profit_pct = (current_price - entry_price) / entry_price * 100
+            else:
+                profit_pct = (entry_price - current_price) / entry_price * 100
+        else:
+            profit_pct = 0.0
+
         try:
             opened_at = datetime.fromisoformat(trade.get('timestamp', '').replace("Z", "+00:00"))
             time_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
         except:
             time_open = 0
 
-        tp_price = float(trade.get('tp_price') or 0)
         target_progress = 0.0
         if tp_price > 0 and entry_price > 0 and (tp_price - entry_price) != 0:
-            if side == 'LONG': target_progress = (current_price - entry_price) / (tp_price - entry_price) * 100
-            else: target_progress = (entry_price - current_price) / (entry_price - tp_price) * 100
+            if side == 'LONG':
+                target_progress = (current_price - entry_price) / (tp_price - entry_price) * 100
+            else:
+                target_progress = (entry_price - current_price) / (entry_price - tp_price) * 100
             target_progress = max(0, min(100, target_progress))
 
+        market_regime = market_data.get('market_structure', 'UNKNOWN')
+        ohlcv = market_data.get('ohlcv', [])
+
         current_data = {
-            'symbol': symbol, 'entry_price': entry_price, 'current_price': current_price,
-            'profit_pct': profit_pct, 'time_open_minutes': int(time_open), 'target_progress': target_progress,
-            'trend_strength': self.analytics.trend_strength(market_data.get('ohlcv', [])),
-            'momentum_score': self.analytics.momentum_score(market_data.get('ohlcv', [])),
-            'funding_rate': self.analytics.funding_rate(symbol),
-            'oi_change_1h': self.analytics.oi_change_1h(symbol), 'oi_trend': 0.0,
-            'apex_score': float(trade.get('confidence', 50)), 'iss_score': 50,
-            'market_regime': market_regime
-        }
-
-        # الاتصال بالذكاء الاصطناعي (مع Timeout الحماية)
-        ai_result = self.ai.get_recommendation(current_data)
-
-        analysis_record = {
-            'trade_id': trade_id, 'symbol': symbol, 'side': side, 'entry_price': entry_price,
-            'current_price': current_price, 'profit_pct': profit_pct, 'time_open_minutes': int(time_open),
-            'target_progress': target_progress, 'trend_strength': current_data['trend_strength'],
-            'momentum_score': current_data['momentum_score'], 'funding_rate': current_data['funding_rate'],
-            'oi_change_1h': current_data['oi_change_1h'], 'oi_trend': 0.0,
-            'apex_score': current_data['apex_score'], 'iss_score': 50,
-            'ai_decision': ai_result.get('recommendation', 'HOLD'),
-            'ai_confidence': ai_result.get('confidence', 50),
-            'ai_explanation': ai_result.get('reason', ''),
-            'ai2_decision': ai_result.get('ai2_decision', ''),
-            'ai2_confidence': ai_result.get('ai2_confidence', 0),
-            'ai2_explanation': ai_result.get('ai2_explanation', ''),
-            'recommendation': ai_result.get('recommendation', 'HOLD'),
-            'probability_tp': ai_result.get('probability_tp', 0),
-            'probability_sl': ai_result.get('probability_sl', 0),
-            'probability_sideways': ai_result.get('probability_sideways', 0),
-            'probability_reversal': ai_result.get('probability_reversal', 0),
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
-        
-        self.db.save_open_analysis(analysis_record)
-        logging.info(f"✅ Analysis Saved for {symbol}")
-
-# =============================================================================
-# 🚀 MAIN
-# =============================================================================
-
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-    logging.info("🚀 Starting APEX Monitor Bot v4.2")
-
-    # 🔴 تحديث مهم: adjustForTimeDifference لحل مشكلة رفض بينانس للطلبات
-    exchange_public = ccxt.binance({
-        "enableRateLimit": True, 
-        "options": {
-            "defaultType": "swap",
-            "adjustForTimeDifference": True 
-        }
-    })
-    
-    try:
-        exchange_public.load_markets() # تحميل الأسواق مرة واحدة
-    except Exception as e:
-        logging.warning(f"Load markets warning: {e}")
-
-    db = MonitorDB(MONITOR_DB_PATH)
-    analytics = AdvancedAnalyticsEngine(exchange_public)
-    ai = AIClient()
-
-    monitor = MonitorLoop(db, analytics, ai)
-    monitor.start()
-
-    telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db, analytics)
-    telegram_bot.run()
-
-if __name__ == "__main__":
-    main()
+            'symbol': symbol,
+            'side': side,
+            'entry_price': entry_price,
+            'current_price': current_price,
+            'tp_price': tp_price,
+            'sl_price': sl_price,
+            'profit_pct': profit_pct,
+            'time_open_minutes': int(time_open),
+            'target_progress': target_pro
