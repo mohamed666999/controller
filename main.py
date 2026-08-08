@@ -66,11 +66,11 @@ APEX_API_URL = "https://binancetrading-production.up.railway.app"
 MONITOR_DB_PATH = "monitor.db"
 
 NVIDIA_API_KEY = "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"
-NVIDIA_API_KEY_OSS = "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"
+NVIDIA_API_KEY_OSS = "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"
 
 MONITOR_INTERVAL = 60
 AI_MODEL = "mistralai/mistral-large-2407"
-AI_MODEL_OSS = "meta/llama3-70b-instruct"
+AI_MODEL_OSS = "openai/gpt-oss-120b"
 DUAL_AI_ENABLED = True
 
 # =============================================================================
@@ -289,13 +289,21 @@ class AdvancedAnalyticsEngine:
         }
 
 # =============================================================================
-# 🤖 AI CLIENT
+# 🤖 AI CLIENT (مع النموذج الجديد)
 # =============================================================================
 
 class AIClient:
     def __init__(self):
-        self.client_mistral = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY)
-        self.client_oss = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY_OSS)
+        # 🔴 النموذج الأول (Mistral) - كما هو
+        self.client_mistral = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=NVIDIA_API_KEY
+        )
+        # 🔴 النموذج الثاني (GPT-OSS-120b) - النموذج الجديد
+        self.client_oss = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=NVIDIA_API_KEY_OSS
+        )
 
     def _call_ai_with_probabilities(self, client, model, trade_data):
         prompt = f"""أنت خبير تداول ذكي. حلل بيانات الصفقة وأعط احتمالات الأهداف:
@@ -314,7 +322,6 @@ class AIClient:
 }}
 """
         try:
-            # 🔴 تمت إضافة Timeout للحماية من تجميد العمال
             response = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
@@ -322,6 +329,12 @@ class AIClient:
                 max_tokens=300,
                 timeout=15.0
             )
+            
+            # 🔴 استخراج reasoning_content إن وجد (لـ GPT-OSS-120b)
+            reasoning = getattr(response.choices[0].message, "reasoning_content", None)
+            if reasoning:
+                logging.info(f"🧠 AI Reasoning ({model}): {reasoning[:100]}...")
+            
             raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
                 raw = "\n".join([l for l in raw.split("\n") if not l.strip().startswith("```")])
