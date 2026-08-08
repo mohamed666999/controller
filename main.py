@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     APEX MONITOR BOT — Telegram AI Monitor v4.8            ║
+║     APEX MONITOR BOT — Telegram AI Monitor v4.9            ║
 ║  Architecture: Hybrid Decision Engine + Execution Layer    ║
 ║  Single AI Model: poolside/laguna-xs-2.1                  ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -86,6 +86,9 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes", "on")
 # -------------------------------------------------------------------------
 MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "60"))
 AI_MODEL = "poolside/laguna-xs-2.1"
+
+# 🔴 الفاصل الزمني بين تحليلات AI لكل صفقة (بالثواني)
+AI_DECISION_INTERVAL = int(os.getenv("AI_DECISION_INTERVAL", "600"))  # 10 دقائق
 
 # -------------------------------------------------------------------------
 # Risk / Hard Guards
@@ -861,7 +864,7 @@ class TelegramBot:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "👋 مرحباً! أنا بوت مراقبة APEX v4.8 (Hybrid Decision + Execution).\n"
+            "👋 مرحباً! أنا بوت مراقبة APEX v4.9 (AI Rate-Limited).\n"
             "الأوامر:\n"
             "/positions - الصفقات المفتوحة مع قرارات الإدارة\n"
             "/advice <id> - تحليل مفصل لصفقة محددة\n"
@@ -878,6 +881,7 @@ class TelegramBot:
 • MAX_LOSS_PCT: {MAX_LOSS_PCT}%
 • DECISION_COOLDOWN: {DECISION_COOLDOWN}s
 • REDUCE_PERCENT: {REDUCE_PERCENT}%
+• AI_DECISION_INTERVAL: {AI_DECISION_INTERVAL}s
 
 📈 <b>الإحصائيات</b>
 • الصفقات المفتوحة: {len(self.db.get_open_trades())}
@@ -997,7 +1001,7 @@ class TelegramBot:
         self.app.run_polling()
 
 # =============================================================================
-# 🔁 MONITOR LOOP مع محرك القرار الهجين المتقدم + طبقة التنفيذ
+# 🔁 MONITOR LOOP مع محرك القرار الهجين المتقدم + طبقة التنفيذ + تحديد معدل AI
 # =============================================================================
 
 class MonitorLoop:
@@ -1009,9 +1013,15 @@ class MonitorLoop:
         self.running = True
         self.queue = Queue()
         self.market_cache = {}
-        self.last_decision_time = {}  # trade_id -> timestamp
+        self.last_decision_time = {}  # trade_id -> timestamp (للتنفيذ)
         self.last_executed_action = {}  # trade_id -> action
         self.execution_lock = threading.Lock()
+
+        # 🔴 حماية معدل الطلبات للـ AI
+        self.ai_lock = threading.Semaphore(1)          # يسمح بطلب AI واحد فقط في كل لحظة
+        self.last_ai_time = {}                         # trade_id -> timestamp (آخر تحليل AI)
+        self.queued_trades = set()                     # تتبع trade_ids في الطابور
+        self.queue_lock = threading.Lock()             # قفل للتعامل مع queued_trades
 
     def start(self):
         for _ in range(3):
@@ -1025,12 +1035,16 @@ class MonitorLoop:
     def _worker(self):
         while True:
             trade = self.queue.get()
-            if trade is None: break
+            if trade is None:
+                break
             try:
                 self._analyze_trade(trade)
             except Exception as e:
                 logging.error(f"Worker Error for {trade.get('symbol', 'UNKNOWN')}:\n{traceback.format_exc()}")
             finally:
+                # إزالة trade_id من queued_trades بعد الانتهاء
+                with self.queue_lock:
+                    self.queued_trades.discard(trade.get('id'))
                 self.queue.task_done()
 
     def _loop(self):
@@ -1038,6 +1052,11 @@ class MonitorLoop:
             try:
                 open_trades = self.db.get_open_trades()
                 for trade in open_trades:
+                    trade_id = trade.get('id')
+                    with self.queue_lock:
+                        if trade_id in self.queued_trades:
+                            continue
+                        self.queued_trades.add(trade_id)
                     self.queue.put(trade)
             except Exception as e:
                 logging.error(f"Monitor loop error: {e}")
@@ -1274,6 +1293,7 @@ class MonitorLoop:
         tp_price = float(trade.get('tp_price') or 0)
         sl_price = float(trade.get('sl_price') or 0)
 
+        # جلب بيانات السوق (يتم تحديثها كل دورة)
         market_data = self.market_cache.get(symbol, {}).get('data', {})
         if not market_data or time.time() - self.market_cache.get(symbol, {}).get('time', 0) > 300:
             market_data = self.analytics.analyze_market(symbol)
@@ -1355,6 +1375,7 @@ class MonitorLoop:
             'reversal_risk': reversal_risk,
         }
 
+        # 🔴 التحقق من الحماية الصارمة أولاً (دائماً)
         forced_decision = self._apply_hard_guards(trade, current_price, profit_pct)
         if forced_decision:
             final_decision = forced_decision
@@ -1364,18 +1385,48 @@ class MonitorLoop:
             management_score = 0
             tp_probability = sl_probability = sideways_probability = reversal_probability = 0
         else:
-            ai_result = self.ai.get_recommendation(current_data)
-            ai_recommendation = ai_result.get('recommendation', 'HOLD')
-            ai_confidence = ai_result.get('confidence', 0)
-            ai_explanation = ai_result.get('reason', '')
-            tp_probability = ai_result.get('tp_probability', 0)
-            sl_probability = ai_result.get('sl_probability', 0)
-            sideways_probability = ai_result.get('sideways_probability', 0)
-            reversal_probability = ai_result.get('reversal_probability', 0)
+            # 🔴 تحديد ما إذا كان يجب استدعاء AI أم لا (بناءً على الفاصل الزمني)
+            now = time.time()
+            last_ai = self.last_ai_time.get(trade_id, 0)
+            use_cached = (now - last_ai) < AI_DECISION_INTERVAL
 
+            if use_cached:
+                # استخدام آخر تحليل مخزن
+                logging.debug(f"⏳ Using cached AI analysis for {symbol} (last: {now - last_ai:.0f}s ago)")
+                cached = self.db.get_latest_open_analysis(trade_id)
+                if cached:
+                    ai_recommendation = cached.get('ai_decision', 'HOLD')
+                    ai_confidence = cached.get('ai_confidence', 50)
+                    ai_explanation = cached.get('ai_explanation', '')
+                    tp_probability = cached.get('probability_tp', 0)
+                    sl_probability = cached.get('probability_sl', 0)
+                    sideways_probability = cached.get('probability_sideways', 0)
+                    reversal_probability = cached.get('probability_reversal', 0)
+                else:
+                    # في حالة عدم وجود مخزن، نضطر لاستدعاء AI
+                    use_cached = False
+
+            if not use_cached:
+                # استدعاء AI مع قفل لمنع التزامن
+                with self.ai_lock:
+                    logging.info(f"🔄 Calling AI for {symbol} (last AI was {now - last_ai:.0f}s ago)")
+                    ai_result = self.ai.get_recommendation(current_data)
+                    self.last_ai_time[trade_id] = now
+                    ai_recommendation = ai_result.get('recommendation', 'HOLD')
+                    ai_confidence = ai_result.get('confidence', 0)
+                    ai_explanation = ai_result.get('reason', '')
+                    tp_probability = ai_result.get('tp_probability', 0)
+                    sl_probability = ai_result.get('sl_probability', 0)
+                    sideways_probability = ai_result.get('sideways_probability', 0)
+                    reversal_probability = ai_result.get('reversal_probability', 0)
+
+            # 🔴 حساب درجة الإدارة المستقلة (دائماً)
             management_score = self._calculate_management_score(current_data)
+
+            # 🔴 القرار النهائي (يعتمد على AI والتقييم المستقل)
             final_decision = self._decide_final(ai_recommendation, management_score, reversal_risk)
 
+            # 🔴 تسجيل القرار في قاعدة البيانات
             decision_record = {
                 'trade_id': trade_id,
                 'symbol': symbol,
@@ -1400,9 +1451,7 @@ class MonitorLoop:
             }
             self.db.save_management_decision(decision_record)
 
-        # =========================================================================
-        # ⚡ EXECUTION LAYER
-        # =========================================================================
+        # 🔴 طبقة التنفيذ (تطبق القرار النهائي مع احترام cooldown)
         execution_result = self._execute_management_action(
             trade=trade,
             final_decision=final_decision,
@@ -1410,7 +1459,7 @@ class MonitorLoop:
         )
         logging.info(f"⚡ MANAGEMENT | {symbol} | Decision={final_decision} | Execution={execution_result}")
 
-        # تسجيل التنفيذ
+        # تسجيل التنفيذ في قاعدة البيانات
         if execution_result.get('executed', False) or not execution_result.get('success', True):
             self.db.save_executed_action({
                 'trade_id': trade_id,
@@ -1426,7 +1475,7 @@ class MonitorLoop:
                 'timestamp': datetime.now(timezone.utc).isoformat()
             })
 
-        # 🔴 5. حفظ التحليل الرئيسي مع الاحتمالات الصحيحة
+        # 🔴 حفظ التحليل الرئيسي (open_analysis) مع الاحتمالات الصحيحة
         analysis_record = {
             'trade_id': trade_id,
             'symbol': symbol,
@@ -1462,7 +1511,7 @@ class MonitorLoop:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-    logging.info("🚀 Starting APEX Position Manager Bot v4.8 (Hybrid Decision + Execution)")
+    logging.info("🚀 Starting APEX Position Manager Bot v4.9 (Rate-Limited AI)")
 
     exchange_public = ccxt.binance({
         "enableRateLimit": True,
@@ -1484,7 +1533,7 @@ def main():
 
     logging.info(f"💱 Binance execution status: {execution_manager.status()}")
 
-    # اختبار الاتصال بالنموذج
+    # اختبار الاتصال بالنموذج (مرة واحدة فقط)
     try:
         logging.info(f"🧪 Testing {AI_MODEL} connection...")
         test_response = ai.client.chat.completions.create(
