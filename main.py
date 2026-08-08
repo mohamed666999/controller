@@ -68,6 +68,7 @@ MONITOR_DB_PATH = os.getenv("MONITOR_DB_PATH", "monitor.db")
 
 # 🔴 المفتاح الوحيد المطلوب هو NVIDIA_API_KEY_OSS
 NVIDIA_API_KEY_OSS = os.getenv("NVIDIA_API_KEY_OSS", "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")
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 MONITOR_INTERVAL = 60
 AI_MODEL = "openai/gpt-oss-120b"  # النموذج الوحيد المستخدم
@@ -301,7 +302,7 @@ class AdvancedAnalyticsEngine:
 class AIClient:
     def __init__(self):
         self.client = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
+            base_url=NVIDIA_BASE_URL,
             api_key=NVIDIA_API_KEY_OSS
         )
 
@@ -796,6 +797,29 @@ def main():
     db = MonitorDB(MONITOR_DB_PATH)
     analytics = AdvancedAnalyticsEngine(exchange_public)
     ai = AIClient()
+
+    # ===================================================================
+    # 🧪 اختبار GPT-OSS-120B قبل بدء التشغيل الكامل
+    # ===================================================================
+    try:
+        logging.info("🧪 Testing GPT-OSS-120B connection...")
+        test_response = ai.client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[
+                {"role": "user", "content": "Reply with exactly: GPT-OSS-OK"}
+            ],
+            temperature=0,
+            max_tokens=20,
+            timeout=10.0
+        )
+        test_content = test_response.choices[0].message.content.strip()
+        logging.info(f"✅ GPT TEST SUCCESS: {test_content}")
+        if "GPT-OSS-OK" not in test_content:
+            logging.warning(f"⚠️ Unexpected test response: {test_content}")
+    except Exception as e:
+        logging.error(f"❌ GPT TEST FAILED: {type(e).__name__}: {e}")
+        # نستمر في التشغيل ولكن مع تحذير، قد يعمل لاحقاً
+        logging.warning("⚠️ GPT-OSS-120B test failed, but bot will continue. Advice may show fallback values.")
 
     monitor = MonitorLoop(db, analytics, ai)
     monitor.start()
