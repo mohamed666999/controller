@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     APEX MONITOR BOT — Telegram AI Monitor v4.5            ║
-║  Architecture: Institutional Position Manager (AI)         ║
+║     APEX MONITOR BOT — Telegram AI Monitor v4.6            ║
+║  Architecture: Hybrid Decision Engine (AI + Hard Guards)   ║
 ║  Single AI Model: poolside/laguna-xs-2.1                  ║
 ╚══════════════════════════════════════════════════════════════╝
 """
@@ -74,6 +74,13 @@ MONITOR_INTERVAL = 60
 AI_MODEL = "poolside/laguna-xs-2.1"  # النموذج الوحيد
 
 # =============================================================================
+# 🛡️ HARD GUARDS CONFIG
+# =============================================================================
+MAX_LOSS_PCT = 1.0               # أقصى خسارة قبل الإغلاق الإجباري (٪)
+DECISION_COOLDOWN = 10 * 60       # فترة التهدئة بين القرارات (ثواني)
+REDUCE_PERCENT = 50               # نسبة التخفيض عند REDUCE (٪ من الحجم)
+
+# =============================================================================
 # 🛡️ CIRCUIT BREAKER
 # =============================================================================
 
@@ -133,6 +140,30 @@ class MonitorDB:
                     probability_sideways REAL, probability_reversal REAL, timestamp TEXT
                 );
             """)
+            # 🔴 جدول قرارات الإدارة للتسجيل والتحليل
+            self.monitor_conn.execute("""
+                CREATE TABLE IF NOT EXISTS management_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id INTEGER,
+                    symbol TEXT,
+                    decision TEXT,
+                    confidence REAL,
+                    price REAL,
+                    profit_pct REAL,
+                    adx REAL,
+                    plus_di REAL,
+                    minus_di REAL,
+                    rsi REAL,
+                    atr_pct REAL,
+                    distance_sl REAL,
+                    distance_tp REAL,
+                    management_score REAL,
+                    ai_recommendation TEXT,
+                    ai_confidence REAL,
+                    ai_explanation TEXT,
+                    timestamp TEXT
+                );
+            """)
             self.monitor_conn.commit()
 
     @circuit_breaker
@@ -159,7 +190,6 @@ class MonitorDB:
             return {}
 
     def save_open_analysis(self, data: Dict[str, Any]):
-        # تعريف الأعمدة بالقيمة المطلوبة
         columns = [
             "trade_id", "symbol", "side", "entry_price", "current_price",
             "profit_pct", "time_open_minutes", "target_progress",
@@ -169,7 +199,6 @@ class MonitorDB:
             "recommendation", "probability_tp", "probability_sl",
             "probability_sideways", "probability_reversal", "timestamp"
         ]
-        # تجميع القيم بنفس الترتيب
         values = [
             data.get("trade_id"),
             data.get("symbol"),
@@ -196,12 +225,10 @@ class MonitorDB:
             data.get("probability_reversal", 0),
             data.get("timestamp")
         ]
-        # التأكد من تطابق العدد
         if len(columns) != len(values):
             error_msg = f"DB mapping mismatch: {len(columns)} columns vs {len(values)} values"
             logging.error(error_msg)
             raise RuntimeError(error_msg)
-        # توليد علامات الاستفهام
         placeholders = ",".join(["?"] * len(values))
         with self.lock:
             try:
@@ -216,6 +243,40 @@ class MonitorDB:
                 self.monitor_conn.commit()
             except Exception as e:
                 logging.error(f"DB Save Error: {e}\nColumns: {len(columns)} | Values: {len(values)}\n{traceback.format_exc()}")
+
+    def save_management_decision(self, data: Dict[str, Any]):
+        with self.lock:
+            try:
+                self.monitor_conn.execute("""
+                    INSERT INTO management_decisions (
+                        trade_id, symbol, decision, confidence, price, profit_pct,
+                        adx, plus_di, minus_di, rsi, atr_pct,
+                        distance_sl, distance_tp, management_score,
+                        ai_recommendation, ai_confidence, ai_explanation, timestamp
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    data.get('trade_id'),
+                    data.get('symbol'),
+                    data.get('decision'),
+                    data.get('confidence'),
+                    data.get('price'),
+                    data.get('profit_pct'),
+                    data.get('adx'),
+                    data.get('plus_di'),
+                    data.get('minus_di'),
+                    data.get('rsi'),
+                    data.get('atr_pct'),
+                    data.get('distance_sl'),
+                    data.get('distance_tp'),
+                    data.get('management_score'),
+                    data.get('ai_recommendation'),
+                    data.get('ai_confidence'),
+                    data.get('ai_explanation'),
+                    data.get('timestamp')
+                ))
+                self.monitor_conn.commit()
+            except Exception as e:
+                logging.error(f"Management Decision Save Error: {e}")
 
     def get_latest_open_analysis(self, trade_id: int) -> Dict:
         with self.lock:
@@ -248,10 +309,10 @@ class AdvancedAnalyticsEngine:
         except Exception as e:
             return {'error': str(e)}
 
-    # 🔴 حساب الـ ADX الحقيقي
-    def trend_strength_adx(self, ohlcv: List) -> float:
+    # 🔴 حساب الـ ADX و DI
+    def adx_di(self, ohlcv: List) -> Dict:
         if not ohlcv or len(ohlcv) < 30:
-            return 0.0
+            return {'adx': 0.0, 'plus_di': 0.0, 'minus_di': 0.0}
         highs = [c[2] for c in ohlcv]
         lows = [c[3] for c in ohlcv]
         closes = [c[4] for c in ohlcv]
@@ -267,8 +328,8 @@ class AdvancedAnalyticsEngine:
         plus_di = 100 * np.mean(plus_dms[-period:]) / atr_val
         minus_di = 100 * np.mean(minus_dms[-period:]) / atr_val
         di_sum = plus_di + minus_di
-        dx = 100 * abs(plus_di - minus_di) / di_sum if di_sum > 0 else 0
-        return dx
+        adx = 100 * abs(plus_di - minus_di) / di_sum if di_sum > 0 else 0
+        return {'adx': adx, 'plus_di': plus_di, 'minus_di': minus_di}
 
     # 🔴 حساب الـ RSI الحقيقي
     def real_rsi(self, ohlcv: List) -> float:
@@ -309,12 +370,19 @@ class AdvancedAnalyticsEngine:
     def detect_market_regime(self, ohlcv: List) -> str:
         if not ohlcv or len(ohlcv) < 50:
             return "UNKNOWN"
-        closes = [c[4] for c in ohlcv]
-        sma20 = np.mean(closes[-20:])
-        sma50 = np.mean(closes[-50:])
-        if abs(sma20 - sma50) / sma50 > 0.015:
-            return "TRENDING_UP" if sma20 > sma50 else "TRENDING_DOWN"
-        return "RANGING"
+        di = self.adx_di(ohlcv)
+        adx = di['adx']
+        plus_di = di['plus_di']
+        minus_di = di['minus_di']
+        if adx < 15:
+            return "RANGING"
+        elif adx >= 25:
+            if plus_di > minus_di:
+                return "TRENDING_UP"
+            else:
+                return "TRENDING_DOWN"
+        else:
+            return "TRANSITION"
 
     def analyze_market(self, symbol: str) -> Dict:
         market = self.fetch_market_data(symbol)
@@ -341,7 +409,6 @@ class AIClient:
         )
 
     def get_recommendation(self, trade_data: Dict) -> Dict:
-        # بناء السياق لـ TP/SL
         tp_sl_context = ""
         if trade_data.get('tp_price', 0) == 0 or trade_data.get('sl_price', 0) == 0:
             tp_sl_context = "تنبيه: لا يوجد TP/SL محدد (يتم إدارتها يدوياً أو عبر التتبع). قم بتقييم الصفقة بناءً على هيكل السوق فقط ولا تعتبر غيابهم خطأ."
@@ -381,7 +448,6 @@ class AIClient:
         try:
             logging.info(f"🤖 Calling {AI_MODEL} for {trade_data.get('symbol')}")
             start_time = time.time()
-
             response = self.client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[
@@ -403,8 +469,6 @@ class AIClient:
             if raw.startswith("json"):
                 raw = raw[4:].strip()
             result = json.loads(raw)
-
-            # توحيد المفاتيح
             return {
                 'recommendation': result.get('action', result.get('recommendation', 'HOLD')).upper(),
                 'confidence': float(result.get('confidence', 50)),
@@ -439,7 +503,7 @@ class TelegramBot:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "👋 مرحباً! أنا بوت مراقبة APEX v4.5 (AI Position Manager).\n"
+            "👋 مرحباً! أنا بوت مراقبة APEX v4.6 (Hybrid Decision Engine).\n"
             "الأوامر:\n"
             "/positions - الصفقات المفتوحة مع قرارات الإدارة\n"
             "/advice <id> - تحليل مفصل لصفقة محددة\n"
@@ -550,7 +614,7 @@ class TelegramBot:
         self.app.run_polling()
 
 # =============================================================================
-# 🔁 MONITOR LOOP
+# 🔁 MONITOR LOOP مع محرك القرار الهجين
 # =============================================================================
 
 class MonitorLoop:
@@ -561,6 +625,7 @@ class MonitorLoop:
         self.running = True
         self.queue = Queue()
         self.market_cache = {}
+        self.last_decision_time = {}  # trade_id -> timestamp
 
     def start(self):
         for _ in range(3):
@@ -592,6 +657,102 @@ class MonitorLoop:
                 logging.error(f"Monitor loop error: {e}")
             time.sleep(MONITOR_INTERVAL)
 
+    def _calculate_management_score(self, data: Dict) -> float:
+        """
+        حساب درجة إدارة الصفقة بناءً على قواعد حتمية.
+        النتيجة: 0-100، كلما زادت كلما كانت الصفقة أفضل للاحتفاظ.
+        """
+        score = 50.0
+
+        # الربح/الخسارة
+        profit = data.get('profit_pct', 0.0)
+        if profit > 0:
+            score += 10
+        else:
+            score -= 10
+
+        # قوة الاتجاه (ADX)
+        adx = data.get('adx', 0.0)
+        if adx >= 25:
+            score += 10
+        elif adx < 15:
+            score -= 5
+
+        # المسافة إلى SL
+        dist_sl = data.get('distance_to_sl_pct', 100.0)
+        atr_pct = data.get('atr_pct', 1.0)
+        if dist_sl < atr_pct * 0.5:
+            score -= 20
+
+        # المسافة إلى TP
+        dist_tp = data.get('distance_to_tp_pct', 0.0)
+        if dist_tp < atr_pct:
+            score += 10
+
+        # توافق الاتجاه مع الترند
+        side = data.get('side', '')
+        regime = data.get('market_regime', '')
+        if side == 'SHORT' and regime == 'TRENDING_UP':
+            score -= 25
+        elif side == 'LONG' and regime == 'TRENDING_DOWN':
+            score -= 25
+        elif side == 'LONG' and regime == 'TRENDING_UP':
+            score += 10
+        elif side == 'SHORT' and regime == 'TRENDING_DOWN':
+            score += 10
+
+        # RSI extremes
+        rsi = data.get('rsi', 50.0)
+        if side == 'LONG' and rsi > 70:
+            score -= 15
+        elif side == 'SHORT' and rsi < 30:
+            score -= 15
+
+        return max(0.0, min(100.0, score))
+
+    def _apply_hard_guards(self, trade: Dict, current_price: float, profit_pct: float) -> str:
+        """
+        تطبيق الحماية الصارمة: كسر SL، خسارة قصوى.
+        ترجع 'CLOSE' إذا كان الإغلاق إجبارياً، وإلا ترجع None.
+        """
+        side = trade.get('side', '')
+        sl_price = float(trade.get('sl_price') or 0)
+
+        if sl_price > 0:
+            if side == 'LONG' and current_price <= sl_price:
+                logging.info(f"🛑 Hard SL hit for {trade.get('symbol')} at {current_price}")
+                return 'CLOSE'
+            if side == 'SHORT' and current_price >= sl_price:
+                logging.info(f"🛑 Hard SL hit for {trade.get('symbol')} at {current_price}")
+                return 'CLOSE'
+
+        if profit_pct <= -MAX_LOSS_PCT:
+            logging.info(f"🚨 Max loss reached for {trade.get('symbol')}: {profit_pct:.2f}%")
+            return 'CLOSE'
+
+        return None
+
+    def _decide_final(self, ai_recommendation: str, management_score: float) -> str:
+        """
+        دمج توصية الـAI مع الـManagement Score لإنتاج القرار النهائي.
+        """
+        # إذا كانت الدرجة منخفضة جداً، نغلق حتى لو قال AI HOLD
+        if management_score < 30:
+            return 'CLOSE'
+        elif management_score < 50:
+            # قد نخفض أو نغلق، نفضل أخذ رأي AI إذا كان CLOSE
+            if ai_recommendation in ('CLOSE', 'REDUCE'):
+                return ai_recommendation
+            else:
+                return 'REDUCE'
+        else:
+            # درجة جيدة، نأخذ توصية AI
+            if ai_recommendation in ('HOLD', 'TRAIL_SL'):
+                return ai_recommendation
+            else:
+                # إذا قال AI CLOSE ولكن الدرجة عالية، قد نستمر
+                return 'HOLD'
+
     def _analyze_trade(self, trade):
         trade_id = trade.get('id')
         symbol = trade.get('symbol', '')
@@ -600,6 +761,7 @@ class MonitorLoop:
         tp_price = float(trade.get('tp_price') or 0)
         sl_price = float(trade.get('sl_price') or 0)
 
+        # جلب بيانات السوق
         market_data = self.market_cache.get(symbol, {}).get('data', {})
         if not market_data or time.time() - self.market_cache.get(symbol, {}).get('time', 0) > 300:
             market_data = self.analytics.analyze_market(symbol)
@@ -614,6 +776,7 @@ class MonitorLoop:
         else:
             profit_pct = 0.0
 
+        # وقت الفتح
         try:
             opened_at = datetime.fromisoformat(trade.get('timestamp', '').replace("Z", "+00:00"))
             time_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
@@ -639,7 +802,16 @@ class MonitorLoop:
             target_progress = max(0, min(100, target_progress))
 
         ohlcv = market_data.get('ohlcv', [])
+        di = self.analytics.adx_di(ohlcv)
+        adx = di['adx']
+        plus_di = di['plus_di']
+        minus_di = di['minus_di']
+        rsi = self.analytics.real_rsi(ohlcv)
+        atr_pct = self.analytics.get_atr_pct(ohlcv)
+        funding = self.analytics.funding_rate(symbol)
+        regime = market_data.get('market_structure', 'UNKNOWN')
 
+        # البيانات الكاملة للتحليل
         current_data = {
             'symbol': symbol,
             'side': side,
@@ -648,20 +820,65 @@ class MonitorLoop:
             'profit_pct': profit_pct,
             'time_open_minutes': int(time_open),
             'target_progress': target_progress,
-            'trend_strength_adx': self.analytics.trend_strength_adx(ohlcv),
-            'rsi_14': self.analytics.real_rsi(ohlcv),
-            'atr_pct': self.analytics.get_atr_pct(ohlcv),
-            'funding_rate': self.analytics.funding_rate(symbol),
-            'market_regime': market_data.get('market_structure', 'UNKNOWN'),
+            'trend_strength_adx': adx,
+            'rsi_14': rsi,
+            'atr_pct': atr_pct,
+            'funding_rate': funding,
+            'market_regime': regime,
             'tp_price': tp_price,
             'sl_price': sl_price,
             'distance_to_tp_pct': max(0, dist_tp_pct),
             'distance_to_sl_pct': max(0, dist_sl_pct),
             'risk_reward': rr_ratio,
+            'adx': adx,
+            'plus_di': plus_di,
+            'minus_di': minus_di,
         }
 
-        ai_result = self.ai.get_recommendation(current_data)
+        # 🔴 1. التطبيقات الصارمة (Hard Guards)
+        forced_decision = self._apply_hard_guards(trade, current_price, profit_pct)
+        if forced_decision:
+            final_decision = forced_decision
+            ai_recommendation = forced_decision
+            ai_confidence = 100
+            ai_explanation = "إغلاق إجباري بسبب كسر وقف الخسارة أو الخسارة القصوى."
+        else:
+            # 🔴 2. استشارة الـAI (كـمستشار)
+            ai_result = self.ai.get_recommendation(current_data)
+            ai_recommendation = ai_result.get('recommendation', 'HOLD')
+            ai_confidence = ai_result.get('confidence', 0)
+            ai_explanation = ai_result.get('reason', '')
 
+            # 🔴 3. حساب درجة الإدارة المستقلة
+            management_score = self._calculate_management_score(current_data)
+
+            # 🔴 4. محرك القرار النهائي
+            final_decision = self._decide_final(ai_recommendation, management_score)
+
+            # تسجيل القرار في قاعدة البيانات
+            decision_record = {
+                'trade_id': trade_id,
+                'symbol': symbol,
+                'decision': final_decision,
+                'confidence': ai_confidence,  # مؤقتاً
+                'price': current_price,
+                'profit_pct': profit_pct,
+                'adx': adx,
+                'plus_di': plus_di,
+                'minus_di': minus_di,
+                'rsi': rsi,
+                'atr_pct': atr_pct,
+                'distance_sl': dist_sl_pct,
+                'distance_tp': dist_tp_pct,
+                'management_score': management_score,
+                'ai_recommendation': ai_recommendation,
+                'ai_confidence': ai_confidence,
+                'ai_explanation': ai_explanation,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+            self.db.save_management_decision(decision_record)
+
+        # 🔴 5. حفظ التحليل الرئيسي (للتوافق مع النظام القديم)
         analysis_record = {
             'trade_id': trade_id,
             'symbol': symbol,
@@ -671,26 +888,25 @@ class MonitorLoop:
             'profit_pct': profit_pct,
             'time_open_minutes': int(time_open),
             'target_progress': target_progress,
-            'trend_strength': current_data['trend_strength_adx'],
-            'momentum_score': current_data['rsi_14'],
-            'funding_rate': current_data['funding_rate'],
+            'trend_strength': adx,
+            'momentum_score': rsi,
+            'funding_rate': funding,
             'oi_change_1h': 0.0,
             'oi_trend': 0.0,
             'apex_score': float(trade.get('confidence', 50)),
             'iss_score': 50,
-            'ai_decision': ai_result.get('recommendation', 'HOLD'),
-            'ai_confidence': ai_result.get('confidence', 0),
-            'ai_explanation': ai_result.get('reason', ''),
-            'recommendation': ai_result.get('recommendation', 'HOLD'),
-            'probability_tp': ai_result.get('tp_probability', 0),
-            'probability_sl': ai_result.get('sl_probability', 0),
-            'probability_sideways': ai_result.get('sideways_probability', 0),
-            'probability_reversal': ai_result.get('reversal_probability', 0),
+            'ai_decision': ai_recommendation,
+            'ai_confidence': ai_confidence,
+            'ai_explanation': ai_explanation,
+            'recommendation': final_decision,
+            'probability_tp': 0,  # نتركها صفر مؤقتاً
+            'probability_sl': 0,
+            'probability_sideways': 0,
+            'probability_reversal': 0,
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
-
         self.db.save_open_analysis(analysis_record)
-        logging.info(f"✅ Position Manager Analysis Saved for {symbol}")
+        logging.info(f"✅ Decision saved for {symbol}: {final_decision} (AI: {ai_recommendation}, Score: {management_score:.1f})")
 
 # =============================================================================
 # 🚀 MAIN
@@ -698,7 +914,7 @@ class MonitorLoop:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-    logging.info("🚀 Starting APEX Position Manager Bot v4.5 (Laguna XS 2.1)")
+    logging.info("🚀 Starting APEX Position Manager Bot v4.6 (Hybrid Decision Engine)")
 
     exchange_public = ccxt.binance({
         "enableRateLimit": True,
@@ -717,7 +933,7 @@ def main():
     analytics = AdvancedAnalyticsEngine(exchange_public)
     ai = AIClient()
 
-    # 🧪 اختبار الاتصال بالنموذج
+    # اختبار الاتصال بالنموذج
     try:
         logging.info(f"🧪 Testing {AI_MODEL} connection...")
         test_response = ai.client.chat.completions.create(
