@@ -704,4 +704,83 @@ class MonitorLoop:
             'sl_price': sl_price,
             'profit_pct': profit_pct,
             'time_open_minutes': int(time_open),
-            'target_progress': target_pro
+            'target_progress': target_progress,
+            'trend_strength': self.analytics.trend_strength(ohlcv),
+            'momentum_score': self.analytics.momentum_score(ohlcv),
+            'funding_rate': self.analytics.funding_rate(symbol),
+            'oi_change_1h': self.analytics.oi_change_1h(symbol),
+            'oi_trend': 0.0,
+            'apex_score': float(trade.get('confidence', 50)),
+            'iss_score': 50,
+            'market_regime': market_regime
+        }
+
+        # الاتصال بالذكاء الاصطناعي
+        ai_result = self.ai.get_recommendation(current_data)
+
+        analysis_record = {
+            'trade_id': trade_id,
+            'symbol': symbol,
+            'side': side,
+            'entry_price': entry_price,
+            'current_price': current_price,
+            'profit_pct': profit_pct,
+            'time_open_minutes': int(time_open),
+            'target_progress': target_progress,
+            'trend_strength': current_data['trend_strength'],
+            'momentum_score': current_data['momentum_score'],
+            'funding_rate': current_data['funding_rate'],
+            'oi_change_1h': current_data['oi_change_1h'],
+            'oi_trend': 0.0,
+            'apex_score': current_data['apex_score'],
+            'iss_score': 50,
+            'ai_decision': ai_result.get('recommendation', 'ERROR'),
+            'ai_confidence': ai_result.get('confidence', 0),
+            'ai_explanation': ai_result.get('reason', ''),
+            'ai2_decision': ai_result.get('ai2_decision', ''),
+            'ai2_confidence': ai_result.get('ai2_confidence', 0),
+            'ai2_explanation': ai_result.get('ai2_explanation', ''),
+            'recommendation': ai_result.get('recommendation', 'ERROR'),
+            'probability_tp': ai_result.get('probability_tp', 0),
+            'probability_sl': ai_result.get('probability_sl', 0),
+            'probability_sideways': ai_result.get('probability_sideways', 0),
+            'probability_reversal': ai_result.get('probability_reversal', 0),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+        
+        self.db.save_open_analysis(analysis_record)
+        logging.info(f"✅ Analysis Saved for {symbol}")
+
+# =============================================================================
+# 🚀 MAIN
+# =============================================================================
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
+    logging.info("🚀 Starting APEX Monitor Bot v4.2")
+
+    exchange_public = ccxt.binance({
+        "enableRateLimit": True, 
+        "options": {
+            "defaultType": "swap",
+            "adjustForTimeDifference": True 
+        }
+    })
+    
+    try:
+        exchange_public.load_markets()
+    except Exception as e:
+        logging.warning(f"Load markets warning: {e}")
+
+    db = MonitorDB(MONITOR_DB_PATH)
+    analytics = AdvancedAnalyticsEngine(exchange_public)
+    ai = AIClient()  # 🔴 سيتم عرض النماذج المتاحة تلقائياً
+
+    monitor = MonitorLoop(db, analytics, ai)
+    monitor.start()
+
+    telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db, analytics)
+    telegram_bot.run()
+
+if __name__ == "__main__":
+    main()
