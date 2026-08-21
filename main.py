@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════════════╗
-║     APEX MONITOR BOT — Telegram AI Monitor v4.9            ║
-║  Architecture: Hybrid Decision Engine + Execution Layer    ║
-║  Single AI Model: poolside/laguna-xs-2.1                  ║
-╚══════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                          ║
+║     APEX KAF ADVISOR BOT v5.0 — استشاري الصفقات الذكي (بدون تنفيذ)                      ║
+║                                                                                          ║
+║  Architecture: Advisory-Only + AI Analysis + SP/TP from QUANTUM APEX v4.0               ║
+║  AI Model: poolside/laguna-xs-2.1                                                       ║
+║                                                                                          ║
+║  ⚠️ هذا البوت لا ينفذ أي صفقات — مراقب ومستشار فقط                                     ║
+║                                                                                          ║
+╚══════════════════════════════════════════════════════════════════════════════════════════╝
 """
 
 import os
@@ -15,16 +20,15 @@ import logging
 import threading
 import sqlite3
 import traceback
+import numpy as np
+import requests
+import ccxt
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from queue import Queue
 from functools import wraps
 
-import numpy as np
-import requests
-import ccxt
 from openai import OpenAI
-
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -49,54 +53,43 @@ def get_public_ip():
         return f"ERROR: {e}"
 
 print("=" * 70)
-print("🚀 RAILWAY DEPLOYMENT IP DETECTION")
+print("🚀 APEX KAF ADVISOR BOT v5.0 — STARTING")
 print("=" * 70)
 DEPLOYMENT_IP = get_public_ip()
 print(f"📌 PUBLIC IP: {DEPLOYMENT_IP}")
+print("=" * 70)
+print("⚠️  وضع الاستشارة فقط — لن يتم تنفيذ أي أوامر")
 print("=" * 70)
 
 # =============================================================================
 # 🔧 CONFIG
 # =============================================================================
 
-# 🔴 استخدم متغيرات البيئة في الإنتاج
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "6033203084"))
 
 APEX_API_URL = os.getenv("APEX_API_URL", "https://binancetrading-production.up.railway.app")
-MONITOR_DB_PATH = os.getenv("MONITOR_DB_PATH", "monitor.db")
+MONITOR_DB_PATH = os.getenv("MONITOR_DB_PATH", "kaf_advisor.db")
 
-# 🔴 المفتاح الجديد ونموذج poolside/laguna-xs-2.1
+# AI Config
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "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")
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-
-# -------------------------------------------------------------------------
-# Binance Futures
-# -------------------------------------------------------------------------
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "IX7kLH0ssWHP5TpYMUGcp0pzq4LX4Lqi7m4XtlqMkkq6DCZAsLhoeYZ3533jJFF4")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "LmICnpSpMxL1riv4RfIf0HBGRfhDTP5JhDUYdlPSukpqV7kDTonrZ0j3DWp1a7hU")
-
-# 🔴 مهم جداً:
-# true = لا يتم إرسال أي أمر إلى Binance
-# false = يسمح بالتنفيذ الحقيقي
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes", "on")
-
-# -------------------------------------------------------------------------
-# Monitor
-# -------------------------------------------------------------------------
-MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "60"))
 AI_MODEL = "poolside/laguna-xs-2.1"
 
-# 🔴 الفاصل الزمني بين تحليلات AI لكل صفقة (بالثواني)
+# Monitor
+MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "60"))
 AI_DECISION_INTERVAL = int(os.getenv("AI_DECISION_INTERVAL", "600"))  # 10 دقائق
 
-# -------------------------------------------------------------------------
-# Risk / Hard Guards
-# -------------------------------------------------------------------------
-MAX_LOSS_PCT = float(os.getenv("MAX_LOSS_PCT", "1.0"))
-DECISION_COOLDOWN = int(os.getenv("DECISION_COOLDOWN", str(10 * 60)))
-REDUCE_PERCENT = float(os.getenv("REDUCE_PERCENT", "50"))
-MIN_ORDER_AMOUNT = float(os.getenv("MIN_ORDER_AMOUNT", "0"))
+# =============================================================================
+# 🔢 ثوابت حساب SP/TP من QUANTUM APEX v4.0 (بدون تغيير)
+# =============================================================================
+# هذه القيم مأخوذة مباشرة من البوت الأول — QUANTUM APEX v4.0
+# SL = entry ± (ATR × 2.5)
+# TP = entry ± (ATR × 5.0)
+ATR_PERIOD = 14
+STOP_LOSS_ATR_MULTIPLE = 2.5      # من CFG.risk.default_stop_atr_multiple
+TAKE_PROFIT_ATR_MULTIPLE = 5.0    # من CFG.risk.default_take_profit_atr_multiple
+ATR_SAFETY_FLOOR_PCT = 0.0001     # أقل قيمة ممكنة للـ ATR (0.01% من السعر)
 
 # =============================================================================
 # 🛡️ CIRCUIT BREAKER
@@ -147,58 +140,23 @@ class MonitorDB:
     def _init_tables(self):
         with self.lock:
             self.monitor_conn.execute("""
-                CREATE TABLE IF NOT EXISTS open_analysis (
+                CREATE TABLE IF NOT EXISTS kaf_analysis (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_id INTEGER, symbol TEXT, side TEXT, entry_price REAL,
-                    current_price REAL, profit_pct REAL, time_open_minutes INTEGER,
+                    trade_id INTEGER, symbol TEXT, side TEXT,
+                    entry_price REAL, current_price REAL,
+                    sp_price REAL, tp_price REAL,
+                    profit_if_tp REAL, loss_if_sp REAL,
+                    profit_if_tp_pct REAL, loss_if_sp_pct REAL,
+                    position_size_usdt REAL, leverage INTEGER,
+                    profit_pct REAL, time_open_minutes INTEGER,
                     target_progress REAL, trend_strength REAL, momentum_score REAL,
-                    funding_rate REAL, oi_change_1h REAL, oi_trend REAL, apex_score REAL,
-                    iss_score REAL, ai_decision TEXT, ai_confidence REAL, ai_explanation TEXT,
-                    recommendation TEXT, probability_tp REAL, probability_sl REAL,
-                    probability_sideways REAL, probability_reversal REAL, timestamp TEXT
-                );
-            """)
-            # 🔴 جدول قرارات الإدارة للتسجيل والتحليل
-            self.monitor_conn.execute("""
-                CREATE TABLE IF NOT EXISTS management_decisions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_id INTEGER,
-                    symbol TEXT,
-                    decision TEXT,
-                    confidence REAL,
-                    price REAL,
-                    profit_pct REAL,
-                    adx REAL,
-                    plus_di REAL,
-                    minus_di REAL,
-                    rsi REAL,
-                    atr_pct REAL,
-                    distance_sl REAL,
-                    distance_tp REAL,
-                    trend_alignment TEXT,
-                    reversal_risk REAL,
-                    management_score REAL,
-                    ai_recommendation TEXT,
-                    ai_confidence REAL,
-                    ai_explanation TEXT,
-                    timestamp TEXT
-                );
-            """)
-            # 🔴 جدول تنفيذ الأوامر
-            self.monitor_conn.execute("""
-                CREATE TABLE IF NOT EXISTS executed_actions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_id INTEGER,
-                    symbol TEXT,
-                    action TEXT,
-                    side TEXT,
-                    amount REAL,
-                    price REAL,
-                    order_id TEXT,
-                    dry_run BOOLEAN,
-                    success BOOLEAN,
-                    reason TEXT,
-                    timestamp TEXT
+                    funding_rate REAL, market_regime TEXT,
+                    atr_value REAL, atr_pct REAL,
+                    ai_decision TEXT, ai_confidence REAL, ai_explanation TEXT,
+                    probability_tp REAL, probability_sl REAL,
+                    probability_sideways REAL, probability_reversal REAL,
+                    risk_reward_ratio REAL, trend_alignment TEXT, reversal_risk REAL,
+                    management_score REAL, timestamp TEXT
                 );
             """)
             self.monitor_conn.commit()
@@ -216,156 +174,67 @@ class MonitorDB:
             logging.error(f"API Fetch Error: {e}")
             return []
 
-    def get_statistics(self) -> Dict[str, Any]:
-        try:
-            resp = requests.get(f"{APEX_API_URL}/health", timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get('performance', data)
-            return {}
-        except Exception:
-            return {}
-
-    def save_open_analysis(self, data: Dict[str, Any]):
+    def save_kaf_analysis(self, data: Dict[str, Any]):
         columns = [
             "trade_id", "symbol", "side", "entry_price", "current_price",
+            "sp_price", "tp_price", "profit_if_tp", "loss_if_sp",
+            "profit_if_tp_pct", "loss_if_sp_pct",
+            "position_size_usdt", "leverage",
             "profit_pct", "time_open_minutes", "target_progress",
-            "trend_strength", "momentum_score", "funding_rate",
-            "oi_change_1h", "oi_trend", "apex_score", "iss_score",
+            "trend_strength", "momentum_score", "funding_rate", "market_regime",
+            "atr_value", "atr_pct",
             "ai_decision", "ai_confidence", "ai_explanation",
             "recommendation", "probability_tp", "probability_sl",
-            "probability_sideways", "probability_reversal", "timestamp"
+            "probability_sideways", "probability_reversal",
+            "risk_reward_ratio", "trend_alignment", "reversal_risk",
+            "management_score", "timestamp"
         ]
         values = [
-            data.get("trade_id"),
-            data.get("symbol"),
-            data.get("side"),
-            data.get("entry_price"),
-            data.get("current_price"),
-            data.get("profit_pct"),
-            data.get("time_open_minutes"),
-            data.get("target_progress"),
-            data.get("trend_strength"),
-            data.get("momentum_score"),
-            data.get("funding_rate"),
-            data.get("oi_change_1h"),
-            data.get("oi_trend"),
-            data.get("apex_score"),
-            data.get("iss_score"),
-            data.get("ai_decision"),
-            data.get("ai_confidence"),
-            data.get("ai_explanation"),
-            data.get("recommendation"),
-            data.get("probability_tp", 0),
-            data.get("probability_sl", 0),
-            data.get("probability_sideways", 0),
-            data.get("probability_reversal", 0),
+            data.get("trade_id"), data.get("symbol"), data.get("side"),
+            data.get("entry_price"), data.get("current_price"),
+            data.get("sp_price"), data.get("tp_price"),
+            data.get("profit_if_tp"), data.get("loss_if_sp"),
+            data.get("profit_if_tp_pct"), data.get("loss_if_sp_pct"),
+            data.get("position_size_usdt"), data.get("leverage"),
+            data.get("profit_pct"), data.get("time_open_minutes"),
+            data.get("target_progress"), data.get("trend_strength"),
+            data.get("momentum_score"), data.get("funding_rate"),
+            data.get("market_regime"), data.get("atr_value"), data.get("atr_pct"),
+            data.get("ai_decision"), data.get("ai_confidence"),
+            data.get("ai_explanation"), data.get("recommendation"),
+            data.get("probability_tp", 0), data.get("probability_sl", 0),
+            data.get("probability_sideways", 0), data.get("probability_reversal", 0),
+            data.get("risk_reward_ratio", 0), data.get("trend_alignment"),
+            data.get("reversal_risk", 0), data.get("management_score", 0),
             data.get("timestamp")
         ]
         if len(columns) != len(values):
-            error_msg = f"DB mapping mismatch: {len(columns)} columns vs {len(values)} values"
-            logging.error(error_msg)
-            raise RuntimeError(error_msg)
+            logging.error(f"DB mapping mismatch: {len(columns)} columns vs {len(values)} values")
+            return
         placeholders = ",".join(["?"] * len(values))
         with self.lock:
             try:
                 self.monitor_conn.execute(
-                    f"""
-                    INSERT INTO open_analysis (
-                        {",".join(columns)}
-                    ) VALUES ({placeholders})
-                    """,
+                    f"INSERT INTO kaf_analysis ({','.join(columns)}) VALUES ({placeholders})",
                     values
                 )
                 self.monitor_conn.commit()
             except Exception as e:
-                logging.error(f"DB Save Error: {e}\nColumns: {len(columns)} | Values: {len(values)}\n{traceback.format_exc()}")
+                logging.error(f"DB Save Error: {e}\n{traceback.format_exc()}")
 
-    def save_management_decision(self, data: Dict[str, Any]):
+    def get_latest_analysis(self, trade_id: int) -> Optional[Dict]:
         with self.lock:
             try:
-                self.monitor_conn.execute("""
-                    INSERT INTO management_decisions (
-                        trade_id, symbol, decision, confidence, price, profit_pct,
-                        adx, plus_di, minus_di, rsi, atr_pct,
-                        distance_sl, distance_tp, trend_alignment, reversal_risk,
-                        management_score, ai_recommendation, ai_confidence,
-                        ai_explanation, timestamp
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    data.get('trade_id'),
-                    data.get('symbol'),
-                    data.get('decision'),
-                    data.get('confidence'),
-                    data.get('price'),
-                    data.get('profit_pct'),
-                    data.get('adx'),
-                    data.get('plus_di'),
-                    data.get('minus_di'),
-                    data.get('rsi'),
-                    data.get('atr_pct'),
-                    data.get('distance_sl'),
-                    data.get('distance_tp'),
-                    data.get('trend_alignment'),
-                    data.get('reversal_risk'),
-                    data.get('management_score'),
-                    data.get('ai_recommendation'),
-                    data.get('ai_confidence'),
-                    data.get('ai_explanation'),
-                    data.get('timestamp')
-                ))
-                self.monitor_conn.commit()
+                row = self.monitor_conn.execute(
+                    "SELECT * FROM kaf_analysis WHERE trade_id=? ORDER BY id DESC LIMIT 1",
+                    (trade_id,)
+                ).fetchone()
+                if row:
+                    cols = [desc[0] for desc in self.monitor_conn.execute("SELECT * FROM kaf_analysis LIMIT 0").description]
+                    return dict(zip(cols, row))
             except Exception as e:
-                logging.error(f"Management Decision Save Error: {e}")
-
-    def save_executed_action(self, data: Dict[str, Any]):
-        with self.lock:
-            try:
-                self.monitor_conn.execute("""
-                    INSERT INTO executed_actions (
-                        trade_id, symbol, action, side, amount, price,
-                        order_id, dry_run, success, reason, timestamp
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    data.get('trade_id'),
-                    data.get('symbol'),
-                    data.get('action'),
-                    data.get('side'),
-                    data.get('amount'),
-                    data.get('price'),
-                    data.get('order_id'),
-                    data.get('dry_run', True),
-                    data.get('success', False),
-                    data.get('reason'),
-                    data.get('timestamp')
-                ))
-                self.monitor_conn.commit()
-            except Exception as e:
-                logging.error(f"Executed Action Save Error: {e}")
-
-    def get_latest_open_analysis(self, trade_id: int) -> Dict:
-        with self.lock:
-            cursor = self.monitor_conn.execute(
-                "SELECT * FROM open_analysis WHERE trade_id=? ORDER BY timestamp DESC LIMIT 1",
-                (trade_id,)
-            )
-            row = cursor.fetchone()
-            if row:
-                cols = [desc[0] for desc in cursor.description]
-                return dict(zip(cols, row))
-            return {}
-
-    def get_last_executed_action(self, trade_id: int) -> Optional[Dict]:
-        with self.lock:
-            cursor = self.monitor_conn.execute(
-                "SELECT * FROM executed_actions WHERE trade_id=? ORDER BY timestamp DESC LIMIT 1",
-                (trade_id,)
-            )
-            row = cursor.fetchone()
-            if row:
-                cols = [desc[0] for desc in cursor.description]
-                return dict(zip(cols, row))
-            return None
+                logging.error(f"DB read error: {e}")
+        return None
 
 # =============================================================================
 # 📊 ADVANCED ANALYTICS ENGINE
@@ -386,14 +255,38 @@ class AdvancedAnalyticsEngine:
         except Exception as e:
             return {'error': str(e)}
 
-    # 🔴 حساب الـ ADX الحقيقي مع التنعيم
+    def compute_atr(self, ohlcv: List, period: int = 14) -> float:
+        """
+        حساب ATR الحقيقي بنفس طريقة QUANTUM APEX v4.0:
+        يستخدم High-Low-Close (True Range) مع فترة 14
+        """
+        if not ohlcv or len(ohlcv) < period + 1:
+            return 0.0
+        highs = np.array([c[2] for c in ohlcv[-(period+1):]])
+        lows = np.array([c[3] for c in ohlcv[-(period+1):]])
+        closes = np.array([c[4] for c in ohlcv[-(period+1):]])
+
+        # True Range = max(H-L, |H-Cprev|, |L-Cprev|)
+        trs = []
+        for i in range(1, len(closes)):
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i-1]),
+                abs(lows[i] - closes[i-1])
+            )
+            trs.append(tr)
+
+        # ATR = متوسط True Range على آخر `period` فترة
+        atr = float(np.mean(trs[-period:])) if trs else 0.0
+        return atr
+
     def adx_di(self, ohlcv: List, period: int = 14) -> Dict:
         if not ohlcv or len(ohlcv) < period + 5:
             return {'adx': 0.0, 'plus_di': 0.0, 'minus_di': 0.0}
         highs = [c[2] for c in ohlcv]
         lows = [c[3] for c in ohlcv]
         closes = [c[4] for c in ohlcv]
-        
+
         plus_dms, minus_dms, trs = [], [], []
         for i in range(1, len(closes)):
             up_move = highs[i] - highs[i - 1]
@@ -401,15 +294,11 @@ class AdvancedAnalyticsEngine:
             plus_dms.append(up_move if up_move > down_move and up_move > 0 else 0)
             minus_dms.append(down_move if down_move > up_move and down_move > 0 else 0)
             trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
-        
-        # حساب ATR
+
         atr = np.mean(trs[-period:]) or 1e-12
-        
-        # حساب Plus DI و Minus DI
         plus_di = 100 * np.mean(plus_dms[-period:]) / atr
         minus_di = 100 * np.mean(minus_dms[-period:]) / atr
-        
-        # حساب DX لكل فترة
+
         dx_values = []
         for i in range(period, len(plus_dms)):
             p_di = 100 * np.mean(plus_dms[i-period:i]) / atr
@@ -417,16 +306,14 @@ class AdvancedAnalyticsEngine:
             di_sum = p_di + m_di
             if di_sum > 0:
                 dx_values.append(100 * abs(p_di - m_di) / di_sum)
-        
-        # تنعيم DX للحصول على ADX
+
         if len(dx_values) >= period:
             adx = np.mean(dx_values[-period:])
         else:
             adx = np.mean(dx_values) if dx_values else 0.0
-        
+
         return {'adx': adx, 'plus_di': plus_di, 'minus_di': minus_di}
 
-    # 🔴 حساب الـ RSI الحقيقي
     def real_rsi(self, ohlcv: List) -> float:
         if not ohlcv or len(ohlcv) < 15:
             return 50.0
@@ -441,7 +328,6 @@ class AdvancedAnalyticsEngine:
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
 
-    # 🔴 حساب الـ ATR بالنسبة المئوية
     def get_atr_pct(self, ohlcv: List) -> float:
         if not ohlcv or len(ohlcv) < 15:
             return 0.0
@@ -459,7 +345,8 @@ class AdvancedAnalyticsEngine:
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 return float(resp.json().get('lastFundingRate', 0))
-        except: pass
+        except:
+            pass
         return 0.0
 
     def detect_market_regime(self, ohlcv: List) -> str:
@@ -493,7 +380,7 @@ class AdvancedAnalyticsEngine:
         }
 
 # =============================================================================
-# 🤖 AI CLIENT (LAGUNA XS 2.1)
+# 🤖 AI CLIENT — مستشار فقط (لا يصدر أوامر تنفيذ)
 # =============================================================================
 
 class AIClient:
@@ -503,41 +390,45 @@ class AIClient:
             api_key=NVIDIA_API_KEY
         )
 
-    def get_recommendation(self, trade_data: Dict) -> Dict:
-        tp_sl_context = ""
-        if trade_data.get('tp_price', 0) == 0 or trade_data.get('sl_price', 0) == 0:
-            tp_sl_context = "تنبيه: لا يوجد TP/SL محدد (يتم إدارتها يدوياً أو عبر التتبع). قم بتقييم الصفقة بناءً على هيكل السوق فقط ولا تعتبر غيابهم خطأ."
-        else:
-            tp_sl_context = f"مسافة الهدف: {trade_data.get('distance_to_tp_pct', 0):.2f}% | مسافة الوقف: {trade_data.get('distance_to_sl_pct', 0):.2f}% | نسبة المخاطرة للعائد (R:R): {trade_data.get('risk_reward', 0):.2f}"
+    def get_advice(self, trade_data: Dict) -> Dict:
+        """
+        استشارة AI — القرارات هي HOLD / ALERT فقط
+        لا يوجد CLOSE أو REDUCE أو TRAIL_SL لأن البوت لا ينفذ شيئاً
+        """
+        prompt = f"""أنت "مستشار صفقات" (Trade Advisor) في صندوق استثماري محترف. دورك هو الملاحظة والتوصية فقط — لا يمكنك تنفيذ أي إجراء.
 
-        prompt = f"""أنت "مدير صفقات" (Position Manager) في صندوق استثماري محترف. مهمتك ليست فتح صفقات جديدة، بل تقييم صفقة "مفتوحة حالياً" وتحديد الإجراء الأنسب لها.
-
-📊 [بيانات الصفقة المفتوحة]
+📊 [بيانات الصفقة]
 العملة: {trade_data.get('symbol')} | نوع الصفقة: {trade_data.get('side')}
 سعر الدخول: {trade_data.get('entry_price')} | السعر الحالي: {trade_data.get('current_price')}
-الربح الحالي: {trade_data.get('profit_pct', 0):.2f}% | مدة الصفقة: {trade_data.get('time_open_minutes')} دقيقة
+الربح/الخسارة الحالي: {trade_data.get('profit_pct', 0):.2f}% | مدة الصفقة: {trade_data.get('time_open_minutes')} دقيقة
 
-📏 [إدارة المخاطر والأهداف]
-{tp_sl_context}
-التقلبات (ATR%): {trade_data.get('atr_pct', 0):.2f}%
+📏 [وقف الخسارة والهدف — من خوارزمية QUANTUM APEX]
+وقف الخسارة (SP): {trade_data.get('sp_price')} | مسافة SP: {trade_data.get('distance_to_sp_pct', 0):.2f}%
+هدف الربح (TP): {trade_data.get('tp_price')} | مسافة TP: {trade_data.get('distance_to_tp_pct', 0):.2f}%
+نسبة المخاطرة للعائد (R:R): {trade_data.get('risk_reward', 0):.2f}
+
+💰 [حساب الربح والخسارة المتوقع]
+الربح إذا تحقق الهدف (TP): +{trade_data.get('profit_if_tp', 0):.2f} USDT ({trade_data.get('profit_if_tp_pct', 0):.2f}%)
+الخسارة إذا ضرب الوقف (SP): -{trade_data.get('loss_if_sp', 0):.2f} USDT ({trade_data.get('loss_if_sp_pct', 0):.2f}%)
 
 📈 [مؤشرات السوق الحية - 1H]
 حالة السوق: {trade_data.get('market_regime')}
 قوة الاتجاه (ADX): {trade_data.get('trend_strength_adx', 0):.1f}/100
 مؤشر القوة النسبية RSI(14): {trade_data.get('rsi_14', 0):.1f}
+التقلبات (ATR%): {trade_data.get('atr_pct', 0):.2f}%
 معدل التمويل: {trade_data.get('funding_rate', 0):.6f}
 
-يجب أن يكون التفسير (reason) باللغة العربية الفصحى حصراً وبدون أي كلمات إنجليزية. اشرح باحترافية مالية.
+يجب أن يكون التفسير (reason) باللغة العربية الفصحى حصراً وبدون أي كلمات إنجليزية.
 
 أجب بصيغة JSON فقط:
 {{
-    "action": "HOLD أو CLOSE أو REDUCE أو TRAIL_SL",
+    "action": "HOLD أو ALERT",
     "tp_probability": 60,
     "sl_probability": 10,
     "sideways_probability": 20,
     "reversal_probability": 10,
     "confidence": 85,
-    "reason": "اشرح قرارك كمدير صفقات بالعربية الفصحى هنا"
+    "reason": "نصيحتك ك مستشار صفقات — اشرح وضع الصفقة بالعربية الفصحى"
 }}
 """
         try:
@@ -546,7 +437,7 @@ class AIClient:
             response = self.client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a quantitative position manager. Return valid JSON only."},
+                    {"role": "system", "content": "You are a quantitative trade advisor. You observe and recommend only. Return valid JSON only."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=1.0,
@@ -586,273 +477,7 @@ class AIClient:
             }
 
 # =============================================================================
-# 💱 BINANCE EXECUTION MANAGER
-# =============================================================================
-
-class BinanceExecutionManager:
-    def __init__(self):
-        self.enabled = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
-        self.dry_run = DRY_RUN
-        self.exchange = ccxt.binance({
-            "apiKey": BINANCE_API_KEY,
-            "secret": BINANCE_API_SECRET,
-            "enableRateLimit": True,
-            "options": {
-                "defaultType": "future",
-                "adjustForTimeDifference": True,
-            }
-        })
-        self.lock = threading.Lock()
-        
-        if self.enabled:
-            try:
-                self.exchange.load_markets()
-                logging.info("✅ Binance execution manager initialized")
-            except Exception as e:
-                logging.error(f"❌ Binance market loading failed: {e}")
-        else:
-            logging.warning("⚠️ Binance execution manager disabled (missing API keys)")
-        
-        if self.dry_run:
-            logging.warning("🟡 DRY_RUN ENABLED — NO REAL ORDERS WILL BE SENT")
-        else:
-            logging.warning("🔴 LIVE TRADING MODE ENABLED")
-
-    def status(self) -> Dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "dry_run": self.dry_run,
-            "live": self.enabled and not self.dry_run
-        }
-
-    def normalize_symbol(self, symbol: str) -> str:
-        symbol = str(symbol).strip()
-        if ":USDT" in symbol:
-            return symbol
-        if symbol.endswith("/USDT"):
-            return symbol + ":USDT"
-        if symbol.endswith("USDT"):
-            base = symbol[:-4]
-            return f"{base}/USDT:USDT"
-        return symbol
-
-    def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
-        if not self.enabled:
-            return None
-        symbol = self.normalize_symbol(symbol)
-        try:
-            positions = self.exchange.fetch_positions([symbol])
-            for position in positions:
-                contracts = float(position.get("contracts") or 0)
-                if abs(contracts) <= 0:
-                    continue
-                side = str(position.get("side") or "").lower()
-                return {
-                    "symbol": symbol,
-                    "side": side,
-                    "contracts": abs(contracts),
-                    "entry_price": float(position.get("entryPrice") or 0),
-                    "mark_price": float(position.get("markPrice") or 0),
-                    "leverage": float(position.get("leverage") or 1)
-                }
-        except Exception as e:
-            logging.error(f"❌ Binance position fetch error {symbol}: {e}")
-        return None
-
-    def normalize_amount(self, symbol: str, amount: float) -> float:
-        symbol = self.normalize_symbol(symbol)
-        try:
-            amount = float(self.exchange.amount_to_precision(symbol, amount))
-            return amount
-        except Exception as e:
-            logging.error(f"Amount precision error {symbol}: {e}")
-            return float(amount)
-
-    def reduce_position(self, symbol: str, position_side: str, contracts: float, percent: float = 50) -> Dict[str, Any]:
-        symbol = self.normalize_symbol(symbol)
-        reduce_amount = contracts * (percent / 100.0)
-        reduce_amount = self.normalize_amount(symbol, reduce_amount)
-        
-        if reduce_amount <= MIN_ORDER_AMOUNT:
-            return {
-                "success": False,
-                "action": "REDUCE",
-                "reason": "REDUCE amount too small",
-                "amount": reduce_amount
-            }
-
-        side = "sell" if position_side.lower() == "long" else "buy"
-        order_params = {"reduceOnly": True}
-
-        if self.dry_run:
-            logging.warning(f"🟡 DRY RUN REDUCE | {symbol} | {position_side} | {percent}% | amount={reduce_amount}")
-            return {
-                "success": True,
-                "dry_run": True,
-                "action": "REDUCE",
-                "symbol": symbol,
-                "side": side,
-                "amount": reduce_amount
-            }
-
-        if not self.enabled:
-            return {
-                "success": False,
-                "action": "REDUCE",
-                "reason": "Binance API disabled"
-            }
-
-        try:
-            with self.lock:
-                order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="market",
-                    side=side,
-                    amount=reduce_amount,
-                    params=order_params
-                )
-                logging.warning(f"🔴 LIVE REDUCE EXECUTED | {symbol} | {percent}% | amount={reduce_amount} | order={order.get('id')}")
-                return {
-                    "success": True,
-                    "dry_run": False,
-                    "action": "REDUCE",
-                    "symbol": symbol,
-                    "side": side,
-                    "amount": reduce_amount,
-                    "order_id": order.get("id")
-                }
-        except Exception as e:
-            logging.error(f"❌ REDUCE execution failed {symbol}: {e}")
-            return {
-                "success": False,
-                "action": "REDUCE",
-                "reason": str(e)
-            }
-
-    def close_position(self, symbol: str, position_side: str, contracts: float) -> Dict[str, Any]:
-        symbol = self.normalize_symbol(symbol)
-        amount = self.normalize_amount(symbol, contracts)
-        
-        if amount <= MIN_ORDER_AMOUNT:
-            return {
-                "success": False,
-                "action": "CLOSE",
-                "reason": "Position amount too small"
-            }
-
-        side = "sell" if position_side.lower() == "long" else "buy"
-        params = {"reduceOnly": True}
-
-        if self.dry_run:
-            logging.warning(f"🟡 DRY RUN CLOSE | {symbol} | {position_side} | amount={amount}")
-            return {
-                "success": True,
-                "dry_run": True,
-                "action": "CLOSE",
-                "symbol": symbol,
-                "side": side,
-                "amount": amount
-            }
-
-        if not self.enabled:
-            return {
-                "success": False,
-                "action": "CLOSE",
-                "reason": "Binance API disabled"
-            }
-
-        try:
-            with self.lock:
-                order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="market",
-                    side=side,
-                    amount=amount,
-                    params=params
-                )
-                logging.warning(f"🔴 LIVE CLOSE EXECUTED | {symbol} | amount={amount} | order={order.get('id')}")
-                return {
-                    "success": True,
-                    "dry_run": False,
-                    "action": "CLOSE",
-                    "symbol": symbol,
-                    "side": side,
-                    "amount": amount,
-                    "order_id": order.get("id")
-                }
-        except Exception as e:
-            logging.error(f"❌ CLOSE execution failed {symbol}: {e}")
-            return {
-                "success": False,
-                "action": "CLOSE",
-                "reason": str(e)
-            }
-
-    def update_stop_loss(self, symbol: str, position_side: str, stop_price: float) -> Dict[str, Any]:
-        symbol = self.normalize_symbol(symbol)
-        if stop_price <= 0:
-            return {
-                "success": False,
-                "action": "TRAIL_SL",
-                "reason": "Invalid stop price"
-            }
-
-        try:
-            stop_price = float(self.exchange.price_to_precision(symbol, stop_price))
-        except Exception:
-            pass
-
-        if self.dry_run:
-            logging.warning(f"🟡 DRY RUN TRAIL_SL | {symbol} | {position_side} | stop={stop_price}")
-            return {
-                "success": True,
-                "dry_run": True,
-                "action": "TRAIL_SL",
-                "symbol": symbol,
-                "stop_price": stop_price
-            }
-
-        if not self.enabled:
-            return {
-                "success": False,
-                "action": "TRAIL_SL",
-                "reason": "Binance API disabled"
-            }
-
-        try:
-            side = "sell" if position_side.lower() == "long" else "buy"
-            params = {
-                "stopPrice": stop_price,
-                "reduceOnly": True,
-                "workingType": "MARK_PRICE"
-            }
-            with self.lock:
-                order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="STOP_MARKET",
-                    side=side,
-                    amount=None,
-                    params=params
-                )
-                logging.warning(f"🔴 LIVE TRAIL_SL | {symbol} | stop={stop_price} | order={order.get('id')}")
-                return {
-                    "success": True,
-                    "dry_run": False,
-                    "action": "TRAIL_SL",
-                    "symbol": symbol,
-                    "stop_price": stop_price,
-                    "order_id": order.get("id")
-                }
-        except Exception as e:
-            logging.error(f"❌ TRAIL_SL failed {symbol}: {e}")
-            return {
-                "success": False,
-                "action": "TRAIL_SL",
-                "reason": str(e)
-            }
-
-# =============================================================================
-# 📡 TELEGRAM BOT
+# 📡 TELEGRAM BOT — استشاري فقط
 # =============================================================================
 
 class TelegramBot:
@@ -864,29 +489,31 @@ class TelegramBot:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "👋 مرحباً! أنا بوت مراقبة APEX v4.9 (AI Rate-Limited).\n"
+            "👋 مرحباً! أنا بوت المستشار الذكي APEX KAF v5.0\n"
+            "🔍 دوري: مراقبة الصفقات وتقديم SP و TP ونصائح فقط\n"
+            "⚠️ لا أنفذ أي صفقات\n\n"
             "الأوامر:\n"
-            "/positions - الصفقات المفتوحة مع قرارات الإدارة\n"
-            "/advice <id> - تحليل مفصل لصفقة محددة\n"
+            "/positions - الصفقات المفتوحة مع SP/TP والربح/الخسارة المتوقع\n"
+            "/advice <id> - تحليل AI مفصل لصفقة محددة\n"
             "/market <symbol> - تحليل سريع للسوق\n"
-            "/status - حالة التنفيذ (DRY_RUN/LIVE)"
+            "/status - حالة البوت"
         )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_text = f"""
-📊 <b>حالة البوت</b>
+📊 <b>حالة بوت المستشار APEX KAF v5.0</b>
 
 🔧 <b>الإعدادات</b>
-• DRY_RUN: {'🟡 مفعل' if DRY_RUN else '🔴 غير مفعل'}
-• MAX_LOSS_PCT: {MAX_LOSS_PCT}%
-• DECISION_COOLDOWN: {DECISION_COOLDOWN}s
-• REDUCE_PERCENT: {REDUCE_PERCENT}%
+• الوضع: 🟢 استشاري فقط (KAF) — لا ينفذ أي أوامر
+• MONITOR_INTERVAL: {MONITOR_INTERVAL}s
 • AI_DECISION_INTERVAL: {AI_DECISION_INTERVAL}s
+• ATR Period: {ATR_PERIOD}
+• SP Multiplier: {STOP_LOSS_ATR_MULTIPLE}x ATR
+• TP Multiplier: {TAKE_PROFIT_ATR_MULTIPLE}x ATR
 
-📈 <b>الإحصائيات</b>
-• الصفقات المفتوحة: {len(self.db.get_open_trades())}
+📈 <b>الصفقات المفتوحة:</b> {len(self.db.get_open_trades())}
 
-⚠️ {'🟡 وضع المحاكاة نشط - لن يتم تنفيذ أي أوامر حقيقية' if DRY_RUN else '🔴 الوضع المباشر نشط - يتم تنفيذ الأوامر'}
+⚠️ هذا البوت <b>لا ينفذ</b> أي صفقات — يقدم المشورة فقط
         """
         await update.message.reply_text(status_text, parse_mode='HTML')
 
@@ -896,44 +523,70 @@ class TelegramBot:
             await update.message.reply_text("لا توجد صفقات مفتوحة حالياً. 💤")
             return
 
-        msg = "📊 <b>الصفقات المفتوحة</b>\n\n"
+        msg = "📊 <b>الصفقات المفتوحة — المستشار الذكي</b>\n"
+        msg += "⚠️ <i>هذا البوت لا ينفذ أي أوامر — مراقب فقط</i>\n\n"
+
         for t in trades:
             trade_id = t.get('id', '?')
             symbol = str(t.get('symbol', 'UNKNOWN')).replace(':USDT', '')
             side = str(t.get('side', 'UNKNOWN'))
             entry_price = round(float(t.get('entry_price') or 0), 6)
-            sl_price = round(float(t.get('sl_price') or 0), 6)
-            tp_price = round(float(t.get('tp_price') or 0), 6)
             leverage = t.get('leverage_used', 1)
-            slot = t.get('slot_used', '?')
             score = t.get('confidence', 0)
-            regime = str(t.get('regime', 'غير محدد'))
-            direction_emoji = '🟢 LONG' if side == 'LONG' else '🔴 SHORT'
 
-            msg += f"• <b>{symbol}</b> (ID: <code>{trade_id}</code>)\n"
-            msg += f"الاتجاه: {direction_emoji} | الرافعة: x{leverage} (Slot {slot})\n"
-            msg += f"الدخول: <code>{entry_price}</code>\n"
-            msg += f"الوقف: <code>{sl_price}</code> | الهدف: <code>{tp_price}</code>\n"
-            msg += f"قوة الدخول: {score:.1f}/100 | السوق: {regime}\n"
+            # جلب آخر تحليل من قاعدة البيانات
+            analysis = self.db.get_latest_analysis(trade_id)
 
-            analysis = self.db.get_latest_open_analysis(trade_id)
             if analysis:
-                profit = analysis.get('profit_pct', 0)
-                rec = str(analysis.get('recommendation', 'HOLD'))
-                action_icon = "🛑" if rec == "CLOSE" else ("✂️" if rec == "REDUCE" else ("🎯" if rec == "TRAIL_SL" else "⏳"))
-                msg += f"\n📈 <b>إدارة الصفقة (AI):</b>\n"
-                msg += f"الربح الحالي: {profit:+.2f}%\n"
-                msg += f"القرار الآن: {action_icon} <b>{rec}</b> (ثقة: {analysis.get('ai_confidence', 0):.0f}%)\n"
-                
-                # إظهار نتيجة التنفيذ السابق إن وجد
-                last_action = self.db.get_last_executed_action(trade_id)
-                if last_action:
-                    status_icon = "✅" if last_action.get('success') else "❌"
-                    msg += f"آخر تنفيذ: {status_icon} {last_action.get('action')} | {'🟡 محاكاة' if last_action.get('dry_run') else '🔴 حقيقي'}\n"
+                sp_price = round(float(analysis.get('sp_price') or 0), 6)
+                tp_price = round(float(analysis.get('tp_price') or 0), 6)
+                current_price = round(float(analysis.get('current_price') or 0), 6)
+                profit_pct = float(analysis.get('profit_pct') or 0)
+                profit_if_tp = float(analysis.get('profit_if_tp') or 0)
+                loss_if_sp = float(analysis.get('loss_if_sp') or 0)
+                profit_if_tp_pct = float(analysis.get('profit_if_tp_pct') or 0)
+                loss_if_sp_pct = float(analysis.get('loss_if_sp_pct') or 0)
+                rr = float(analysis.get('risk_reward_ratio') or 0)
+                ai_rec = analysis.get('ai_decision', 'HOLD')
+                ai_conf = float(analysis.get('ai_confidence') or 0)
+                ai_reason = analysis.get('ai_explanation', '')
+                tp_prob = float(analysis.get('probability_tp') or 0)
+                sl_prob = float(analysis.get('probability_sl') or 0)
             else:
-                msg += f"\n⏳ <i>جاري تحليل بيانات إدارة الصفقة...</i>\n"
+                # لا يوجد تحليل بعد — نحسب SP/TP على السريع
+                sp_price = 0
+                tp_price = 0
+                current_price = round(float(t.get('current_price') or t.get('mark_price') or 0), 6)
+                profit_pct = 0
+                profit_if_tp = 0
+                loss_if_sp = 0
+                profit_if_tp_pct = 0
+                loss_if_sp_pct = 0
+                rr = 0
+                ai_rec = "⏳"
+                ai_conf = 0
+                ai_reason = "التحليل قيد التجهيز..."
+                tp_prob = 0
+                sl_prob = 0
 
-            msg += "\n" + "─"*25 + "\n\n"
+            side_icon = "🟢" if side == "LONG" else ("🔴" if side == "SHORT" else "⚪")
+            pnl_icon = "📈" if profit_pct >= 0 else "📉"
+
+            msg += f"{side_icon} <b>#{trade_id} {symbol}</b> | {side} | {leverage}x\n"
+            msg += f"   📥 الدخول: ${entry_price}\n"
+            msg += f"   📍 الحالي: ${current_price} {pnl_icon} {profit_pct:+.2f}%\n"
+            msg += f"   🔒 SP: ${sp_price} | 🎯 TP: ${tp_price}\n"
+            msg += f"   📐 R:R = {rr:.2f}\n"
+            msg += f"   💰 إذا حققت الهدف (TP): <b>+{profit_if_tp:.2f} USDT</b> ({profit_if_tp_pct:+.2f}%)\n"
+            msg += f"   🛑 إذا ضرب الوقف (SP): <b>-{loss_if_sp:.2f} USDT</b> ({loss_if_sp_pct:+.2f}%)\n"
+            msg += f"   🤖 AI: {ai_rec} | ثقة: {ai_conf:.0f}%\n"
+            msg += f"   📊 احتمال TP: {tp_prob:.0f}% | احتمال SP: {sl_prob:.0f}%\n"
+            if ai_reason:
+                # تقصير النص إذا كان طويلاً
+                if len(ai_reason) > 150:
+                    ai_reason = ai_reason[:150] + "..."
+                msg += f"   💡 <i>{ai_reason}</i>\n"
+            msg += "─────────────────────\n"
 
         await update.message.reply_text(msg, parse_mode='HTML')
 
@@ -947,25 +600,51 @@ class TelegramBot:
             await update.message.reply_text("المعرف غير صحيح.")
             return
 
-        analysis = self.db.get_latest_open_analysis(trade_id)
+        analysis = self.db.get_latest_analysis(trade_id)
         if not analysis:
             await update.message.reply_text("⏳ التحليل قيد التجهيز أو لم يتم العثور عليه، يرجى الانتظار دقيقة والمحاولة مجدداً.")
             return
 
-        msg = f"🔍 <b>توصية مدير الصفقات #{trade_id}</b>\n"
-        msg += f"العملة: {analysis.get('symbol', 'UNKNOWN')}\n"
-        msg += f"الربح الحالي: {analysis.get('profit_pct', 0):+.2f}%\n"
-        msg += f"\n🎯 <b>الاحتمالات المتوقعة</b>\n"
-        msg += f" الهدف (TP): {analysis.get('probability_tp', 0):.0f}%\n"
-        msg += f" الخسارة (SL): {analysis.get('probability_sl', 0):.0f}%\n"
-        msg += f" عرضي: {analysis.get('probability_sideways', 0):.0f}%\n"
-        msg += f" انعكاس: {analysis.get('probability_reversal', 0):.0f}%\n"
+        symbol = str(analysis.get('symbol', 'UNKNOWN')).replace(':USDT', '')
+        side = analysis.get('side', 'UNKNOWN')
+        entry = analysis.get('entry_price', 0)
+        current = analysis.get('current_price', 0)
+        sp = analysis.get('sp_price', 0)
+        tp = analysis.get('tp_price', 0)
+        profit_pct = analysis.get('profit_pct', 0)
 
-        rec = analysis.get('recommendation', 'HOLD')
-        action_icon = "🛑" if rec == "CLOSE" else ("✂️" if rec == "REDUCE" else ("🎯" if rec == "TRAIL_SL" else "⏳"))
-        msg += f"\n🤖 <b>القرار الإداري:</b> {action_icon} <b>{rec}</b>\n"
-        msg += f"مستوى الثقة: {analysis.get('ai_confidence', 0):.0f}%\n"
-        msg += f"التبرير: <i>{analysis.get('ai_explanation', '')}</i>\n"
+        msg = f"🔍 <b>تقرير المستشار — صفقة #{trade_id}</b>\n\n"
+        msg += f" العملة: <b>{symbol}</b> | {side}\n"
+        msg += f" 📥 الدخول: ${entry:.6f}\n"
+        msg += f" 📍 الحالي: ${current:.6f} ({profit_pct:+.2f}%)\n\n"
+
+        msg += f"📏 <b>وقف الخسارة والهدف (من QUANTUM APEX)</b>\n"
+        msg += f" 🔒 SP: ${sp:.6f}\n"
+        msg += f" 🎯 TP: ${tp:.6f}\n"
+        msg += f" 📐 R:R = {analysis.get('risk_reward_ratio', 0):.2f}\n\n"
+
+        msg += f"💰 <b>حساب الربح والخسارة المتوقع</b>\n"
+        msg += f" ✅ إذا حققت الهدف: <b>+{analysis.get('profit_if_tp', 0):.2f} USDT</b> ({analysis.get('profit_if_tp_pct', 0):+.2f}%)\n"
+        msg += f" ❌ إذا ضرب الوقف: <b>-{analysis.get('loss_if_sp', 0):.2f} USDT</b> ({analysis.get('loss_if_sp_pct', 0):+.2f}%)\n\n"
+
+        msg += f"📈 <b>مؤشرات السوق</b>\n"
+        msg += f" حالة السوق: {analysis.get('market_regime', 'N/A')}\n"
+        msg += f" ADX: {analysis.get('trend_strength', 0):.1f} | RSI: {analysis.get('momentum_score', 0):.1f}\n"
+        msg += f" ATR: {analysis.get('atr_pct', 0):.2f}% | Funding: {analysis.get('funding_rate', 0):.6f}\n\n"
+
+        msg += f"🎯 <b>احتمالات AI</b>\n"
+        msg += f" الهدف (TP): {analysis.get('probability_tp', 0):.0f}%\n"
+        msg += f" الوقف (SP): {analysis.get('probability_sl', 0):.0f}%\n"
+        msg += f" عرضي: {analysis.get('probability_sideways', 0):.0f}%\n"
+        msg += f" انعكاس: {analysis.get('probability_reversal', 0):.0f}%\n\n"
+
+        rec = analysis.get('ai_decision', 'HOLD')
+        conf = analysis.get('ai_confidence', 0)
+        reason = analysis.get('ai_explanation', '')
+        msg += f"🤖 <b>نصيحة المستشار:</b> {rec}\n"
+        msg += f" مستوى الثقة: {conf:.0f}%\n"
+        msg += f" 💡 <i>{reason}</i>\n\n"
+        msg += "⚠️ <i>تذكر: هذا البوت لا ينفذ أي أوامر — أنت من يتخذ القرار</i>"
 
         await update.message.reply_text(msg, parse_mode='HTML')
 
@@ -984,9 +663,24 @@ class TelegramBot:
             if 'error' in market_data:
                 await update.message.reply_text(f"⚠️ خطأ في جلب بيانات {symbol}: {market_data['error']}")
                 return
-            msg = f"📊 <b>تحليل السوق المباشر - {symbol}</b>\n\n"
+            ohlcv = market_data.get('ohlcv', [])
+            atr = self.analytics.compute_atr(ohlcv, ATR_PERIOD)
+            atr_pct = self.analytics.get_atr_pct(ohlcv)
+            price = market_data.get('price', 0)
+
+            # حساب SP و TP المرجعي (كما سيفعلها QUANTUM APEX)
+            sp_long = price - (atr * STOP_LOSS_ATR_MULTIPLE)
+            tp_long = price + (atr * TAKE_PROFIT_ATR_MULTIPLE)
+            sp_short = price + (atr * STOP_LOSS_ATR_MULTIPLE)
+            tp_short = price - (atr * TAKE_PROFIT_ATR_MULTIPLE)
+
+            msg = f"📊 <b>تحليل السوق — {symbol.replace('/USDT:USDT', '')}</b>\n\n"
+            msg += f"<b>السعر الحالي:</b> ${price}\n"
             msg += f"<b>بنية السوق:</b> {market_data.get('market_structure', 'N/A')}\n"
-            msg += f"<b>السعر الحالي:</b> {market_data.get('price', 0)}\n"
+            msg += f"<b>ATR({ATR_PERIOD}):</b> {atr:.6f} ({atr_pct:.2f}%)\n\n"
+            msg += f"📏 <b>SP/TP المرجعي (كما ستحسبهما QUANTUM APEX):</b>\n"
+            msg += f"🟢 LONG: SP=${sp_long:.6f} | TP=${tp_long:.6f}\n"
+            msg += f"🔴 SHORT: SP=${sp_short:.6f} | TP=${tp_short:.6f}\n"
             await update.message.reply_text(msg, parse_mode='HTML')
         except Exception as e:
             await update.message.reply_text(f"⚠️ حدث خطأ غير متوقع: {e}")
@@ -1001,27 +695,21 @@ class TelegramBot:
         self.app.run_polling()
 
 # =============================================================================
-# 🔁 MONITOR LOOP مع محرك القرار الهجين المتقدم + طبقة التنفيذ + تحديد معدل AI
+# 🔁 ADVISOR LOOP — مراقبة وتحليل فقط (بدون تنفيذ)
 # =============================================================================
 
-class MonitorLoop:
-    def __init__(self, db: MonitorDB, analytics: AdvancedAnalyticsEngine, ai: AIClient, execution_manager: BinanceExecutionManager):
+class AdvisorLoop:
+    def __init__(self, db: MonitorDB, analytics: AdvancedAnalyticsEngine, ai: AIClient):
         self.db = db
         self.analytics = analytics
         self.ai = ai
-        self.execution = execution_manager
         self.running = True
         self.queue = Queue()
         self.market_cache = {}
-        self.last_decision_time = {}  # trade_id -> timestamp (للتنفيذ)
-        self.last_executed_action = {}  # trade_id -> action
-        self.execution_lock = threading.Lock()
-
-        # 🔴 حماية معدل الطلبات للـ AI
-        self.ai_lock = threading.Semaphore(1)          # يسمح بطلب AI واحد فقط في كل لحظة
-        self.last_ai_time = {}                         # trade_id -> timestamp (آخر تحليل AI)
-        self.queued_trades = set()                     # تتبع trade_ids في الطابور
-        self.queue_lock = threading.Lock()             # قفل للتعامل مع queued_trades
+        self.last_ai_time = {}
+        self.queued_trades = set()
+        self.queue_lock = threading.Lock()
+        self.ai_lock = threading.Semaphore(1)
 
     def start(self):
         for _ in range(3):
@@ -1030,7 +718,8 @@ class MonitorLoop:
 
     def stop(self):
         self.running = False
-        for _ in range(3): self.queue.put(None)
+        for _ in range(3):
+            self.queue.put(None)
 
     def _worker(self):
         while True:
@@ -1042,7 +731,6 @@ class MonitorLoop:
             except Exception as e:
                 logging.error(f"Worker Error for {trade.get('symbol', 'UNKNOWN')}:\n{traceback.format_exc()}")
             finally:
-                # إزالة trade_id من queued_trades بعد الانتهاء
                 with self.queue_lock:
                     self.queued_trades.discard(trade.get('id'))
                 self.queue.task_done()
@@ -1059,7 +747,7 @@ class MonitorLoop:
                         self.queued_trades.add(trade_id)
                     self.queue.put(trade)
             except Exception as e:
-                logging.error(f"Monitor loop error: {e}")
+                logging.error(f"Advisor loop error: {e}")
             time.sleep(MONITOR_INTERVAL)
 
     def _get_trend_alignment(self, side: str, plus_di: float, minus_di: float) -> str:
@@ -1093,7 +781,10 @@ class MonitorLoop:
 
         return min(100.0, risk)
 
-    def _calculate_management_score(self, data: Dict) -> float:
+    def _calculate_advisory_score(self, data: Dict) -> float:
+        """
+        درجة تقييم الصفقة (للاستشارة فقط — لا تؤدي لتنفيذ)
+        """
         score = 50.0
 
         profit = data.get('profit_pct', 0.0)
@@ -1108,11 +799,11 @@ class MonitorLoop:
         elif adx < 15:
             score -= 5
 
-        dist_sl = data.get('distance_to_sl_pct', 100.0)
+        dist_sp = data.get('distance_to_sp_pct', 100.0)
         atr_pct = data.get('atr_pct', 1.0)
-        if dist_sl < atr_pct * 0.5:
+        if dist_sp < atr_pct * 0.5:
             score -= 20
-        elif dist_sl < atr_pct:
+        elif dist_sp < atr_pct:
             score -= 10
 
         dist_tp = data.get('distance_to_tp_pct', 0.0)
@@ -1130,159 +821,38 @@ class MonitorLoop:
 
         return max(0.0, min(100.0, score))
 
-    def _apply_hard_guards(self, trade: Dict, current_price: float, profit_pct: float) -> str:
-        side = trade.get('side', '')
-        sl_price = float(trade.get('sl_price') or 0)
+    def _calculate_profit_loss(self, entry_price: float, sp_price: float, tp_price: float,
+                                 side: str, qty: float, leverage: int) -> Dict:
+        """
+        حساب الربح المتوقع إذا تحقق TP والخسارة المتوقعة إذا ضرب SP
+        """
+        position_size = entry_price * qty  # حجم المركز بالدولار
 
-        if sl_price > 0:
-            if side == 'LONG' and current_price <= sl_price:
-                logging.info(f"🛑 Hard SL hit for {trade.get('symbol')} at {current_price}")
-                return 'CLOSE'
-            if side == 'SHORT' and current_price >= sl_price:
-                logging.info(f"🛑 Hard SL hit for {trade.get('symbol')} at {current_price}")
-                return 'CLOSE'
+        if side == 'LONG':
+            # ربح إذا وصل السعر لـ TP
+            profit_usdt = (tp_price - entry_price) * qty
+            # خسارة إذا وصل السعر لـ SP
+            loss_usdt = (entry_price - sp_price) * qty
+        else:  # SHORT
+            # ربح إذا وصل السعر لـ TP (الذي هو أقل من الدخول)
+            profit_usdt = (entry_price - tp_price) * qty
+            # خسارة إذا وصل السعر لـ SP (الذي هو أعلى من الدخول)
+            loss_usdt = (sp_price - entry_price) * qty
 
-        if profit_pct <= -MAX_LOSS_PCT:
-            logging.info(f"🚨 Max loss reached for {trade.get('symbol')}: {profit_pct:.2f}%")
-            return 'CLOSE'
+        # مع الرافعة المالية
+        profit_usdt_leveraged = profit_usdt * leverage
+        loss_usdt_leveraged = loss_usdt * leverage
 
-        return None
-
-    def _decide_final(self, ai_recommendation: str, management_score: float, reversal_risk: float) -> str:
-        if management_score < 30:
-            return 'CLOSE'
-        elif management_score < 45:
-            if reversal_risk > 60:
-                return 'CLOSE'
-            elif ai_recommendation in ('CLOSE', 'REDUCE'):
-                return ai_recommendation
-            else:
-                return 'REDUCE'
-        elif management_score < 60:
-            if reversal_risk > 70:
-                return 'CLOSE'
-            elif ai_recommendation == 'CLOSE':
-                return 'CLOSE'
-            else:
-                return 'HOLD'
-        else:
-            if ai_recommendation in ('HOLD', 'TRAIL_SL'):
-                return ai_recommendation
-            else:
-                if management_score > 75:
-                    return 'HOLD'
-                return ai_recommendation
-
-    def _execute_management_action(self, trade: Dict, final_decision: str, current_price: float) -> Dict[str, Any]:
-        trade_id = trade.get('id')
-        symbol = trade.get('symbol', '')
-        side = trade.get('side', '')
-
-        final_decision = str(final_decision or "HOLD").upper()
-
-        if final_decision == "HOLD":
-            return {
-                "success": True,
-                "executed": False,
-                "action": "HOLD",
-                "reason": "No action required"
-            }
-
-        now = time.time()
-        with self.execution_lock:
-            last_time = self.last_decision_time.get(trade_id, 0)
-            if now - last_time < DECISION_COOLDOWN:
-                return {
-                    "success": True,
-                    "executed": False,
-                    "action": final_decision,
-                    "reason": "Decision cooldown"
-                }
-            self.last_decision_time[trade_id] = now
-
-        if final_decision == "REDUCE":
-            previous = self.last_executed_action.get(trade_id)
-            if previous == "REDUCE":
-                return {
-                    "success": True,
-                    "executed": False,
-                    "action": "REDUCE",
-                    "reason": "REDUCE already executed"
-                }
-
-        position = self.execution.get_position(symbol)
-        if not position:
-            logging.warning(f"⚠️ No Binance position found for {symbol}")
-            return {
-                "success": False,
-                "executed": False,
-                "action": final_decision,
-                "reason": "Position not found"
-            }
-
-        contracts = float(position.get("contracts") or 0)
-        actual_side = position.get("side", "")
-
-        if contracts <= 0:
-            return {
-                "success": False,
-                "executed": False,
-                "action": final_decision,
-                "reason": "Position size is zero"
-            }
-
-        if final_decision == "REDUCE":
-            result = self.execution.reduce_position(
-                symbol=symbol,
-                position_side=actual_side,
-                contracts=contracts,
-                percent=REDUCE_PERCENT
-            )
-            if result.get("success"):
-                self.last_executed_action[trade_id] = "REDUCE"
-            return result
-
-        if final_decision == "CLOSE":
-            result = self.execution.close_position(
-                symbol=symbol,
-                position_side=actual_side,
-                contracts=contracts
-            )
-            if result.get("success"):
-                self.last_executed_action[trade_id] = "CLOSE"
-            return result
-
-        if final_decision == "TRAIL_SL":
-            market_data = self.market_cache.get(symbol, {}).get("data", {})
-            ohlcv = market_data.get("ohlcv", [])
-            atr_pct = self.analytics.get_atr_pct(ohlcv)
-            if atr_pct <= 0:
-                return {
-                    "success": False,
-                    "executed": False,
-                    "action": "TRAIL_SL",
-                    "reason": "ATR unavailable"
-                }
-
-            if actual_side.lower() == "long":
-                new_sl = current_price * (1 - (atr_pct * 1.5 / 100))
-            else:
-                new_sl = current_price * (1 + (atr_pct * 1.5 / 100))
-
-            result = self.execution.update_stop_loss(
-                symbol=symbol,
-                position_side=actual_side,
-                stop_price=new_sl
-            )
-            if result.get("success"):
-                self.last_executed_action[trade_id] = "TRAIL_SL"
-            return result
+        # نسبة الربح والخسارة من حجم المركز
+        profit_pct = (profit_usdt / max(position_size, 1e-12)) * 100 * leverage
+        loss_pct = (loss_usdt / max(position_size, 1e-12)) * 100 * leverage
 
         return {
-            "success": False,
-            "executed": False,
-            "action": final_decision,
-            "reason": "Unknown management action"
+            'profit_if_tp': profit_usdt_leveraged,
+            'loss_if_sp': loss_usdt_leveraged,
+            'profit_if_tp_pct': profit_pct,
+            'loss_if_sp_pct': loss_pct,
+            'position_size_usdt': position_size,
         }
 
     def _analyze_trade(self, trade):
@@ -1290,10 +860,10 @@ class MonitorLoop:
         symbol = trade.get('symbol', '')
         entry_price = float(trade.get('entry_price') or 0)
         side = trade.get('side', '')
-        tp_price = float(trade.get('tp_price') or 0)
-        sl_price = float(trade.get('sl_price') or 0)
+        qty = float(trade.get('qty') or 0)
+        leverage = int(trade.get('leverage_used') or 1)
 
-        # جلب بيانات السوق (يتم تحديثها كل دورة)
+        # ─── جلب بيانات السوق ───
         market_data = self.market_cache.get(symbol, {}).get('data', {})
         if not market_data or time.time() - self.market_cache.get(symbol, {}).get('time', 0) > 300:
             market_data = self.analytics.analyze_market(symbol)
@@ -1303,35 +873,61 @@ class MonitorLoop:
             return
 
         current_price = market_data.get('price', entry_price)
+        ohlcv = market_data.get('ohlcv', [])
+
+        # ─── حساب ATR بنفس طريقة QUANTUM APEX v4.0 ───
+        atr = self.analytics.compute_atr(ohlcv, ATR_PERIOD)
+        atr = max(atr, entry_price * ATR_SAFETY_FLOOR_PCT)  # حد أدنى للسلامة
+
+        # ─── حساب SP و TP بنفس خوارزمية QUANTUM APEX v4.0 ───
+        if side == 'LONG':
+            sp_price = entry_price - (atr * STOP_LOSS_ATR_MULTIPLE)
+            tp_price = entry_price + (atr * TAKE_PROFIT_ATR_MULTIPLE)
+        else:
+            sp_price = entry_price + (atr * STOP_LOSS_ATR_MULTIPLE)
+            tp_price = entry_price - (atr * TAKE_PROFIT_ATR_MULTIPLE)
+
+        # ─── حساب الربح والخسارة المتوقع ───
+        pnl_calc = self._calculate_profit_loss(
+            entry_price, sp_price, tp_price, side, qty, leverage
+        )
+
+        # ─── حساب الربح الحالي ───
         if entry_price > 0:
-            profit_pct = ((current_price - entry_price) / entry_price * 100) if side == 'LONG' else ((entry_price - current_price) / entry_price * 100)
+            if side == 'LONG':
+                profit_pct = ((current_price - entry_price) / entry_price) * 100
+            else:
+                profit_pct = ((entry_price - current_price) / entry_price) * 100
         else:
             profit_pct = 0.0
 
+        # ─── مدة الصفقة ───
         try:
             opened_at = datetime.fromisoformat(trade.get('timestamp', '').replace("Z", "+00:00"))
             time_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
         except:
             time_open = 0
 
-        dist_tp_pct = 0.0
-        dist_sl_pct = 0.0
-        rr_ratio = 0.0
-        target_progress = 0.0
-        if tp_price > 0 and sl_price > 0 and entry_price > 0:
+        # ─── مسافات SP و TP ───
+        if sp_price > 0 and tp_price > 0 and entry_price > 0:
             if side == 'LONG':
                 dist_tp_pct = ((tp_price - current_price) / current_price) * 100
-                dist_sl_pct = ((current_price - sl_price) / current_price) * 100
-                rr_ratio = abs(tp_price - entry_price) / abs(entry_price - sl_price) if abs(entry_price - sl_price) > 0 else 0
-                target_progress = (current_price - entry_price) / (tp_price - entry_price) * 100
+                dist_sp_pct = ((current_price - sp_price) / current_price) * 100
+                rr_ratio = abs(tp_price - entry_price) / abs(entry_price - sp_price) if abs(entry_price - sp_price) > 0 else 0
+                target_progress = (current_price - entry_price) / (tp_price - entry_price) * 100 if tp_price != entry_price else 0
             else:
                 dist_tp_pct = ((current_price - tp_price) / current_price) * 100
-                dist_sl_pct = ((sl_price - current_price) / current_price) * 100
-                rr_ratio = abs(entry_price - tp_price) / abs(sl_price - entry_price) if abs(sl_price - entry_price) > 0 else 0
-                target_progress = (entry_price - current_price) / (entry_price - tp_price) * 100
+                dist_sp_pct = ((sp_price - current_price) / current_price) * 100
+                rr_ratio = abs(entry_price - tp_price) / abs(sp_price - entry_price) if abs(sp_price - entry_price) > 0 else 0
+                target_progress = (entry_price - current_price) / (entry_price - tp_price) * 100 if entry_price != tp_price else 0
             target_progress = max(0, min(100, target_progress))
+        else:
+            dist_tp_pct = 0.0
+            dist_sp_pct = 0.0
+            rr_ratio = 0.0
+            target_progress = 0.0
 
-        ohlcv = market_data.get('ohlcv', [])
+        # ─── مؤشرات السوق ───
         di = self.analytics.adx_di(ohlcv)
         adx = di['adx']
         plus_di = di['plus_di']
@@ -1343,13 +939,11 @@ class MonitorLoop:
 
         trend_alignment = self._get_trend_alignment(side, plus_di, minus_di)
         reversal_risk = self._calculate_reversal_risk({
-            'side': side,
-            'adx': adx,
-            'rsi': rsi,
-            'plus_di': plus_di,
-            'minus_di': minus_di
+            'side': side, 'adx': adx, 'rsi': rsi,
+            'plus_di': plus_di, 'minus_di': minus_di
         })
 
+        # ─── إعداد بيانات AI ───
         current_data = {
             'symbol': symbol,
             'side': side,
@@ -1363,147 +957,104 @@ class MonitorLoop:
             'atr_pct': atr_pct,
             'funding_rate': funding,
             'market_regime': regime,
+            'sp_price': sp_price,
             'tp_price': tp_price,
-            'sl_price': sl_price,
             'distance_to_tp_pct': max(0, dist_tp_pct),
-            'distance_to_sl_pct': max(0, dist_sl_pct),
+            'distance_to_sp_pct': max(0, dist_sp_pct),
             'risk_reward': rr_ratio,
-            'adx': adx,
-            'plus_di': plus_di,
-            'minus_di': minus_di,
-            'trend_alignment': trend_alignment,
-            'reversal_risk': reversal_risk,
+            'profit_if_tp': pnl_calc['profit_if_tp'],
+            'loss_if_sp': pnl_calc['loss_if_sp'],
+            'profit_if_tp_pct': pnl_calc['profit_if_tp_pct'],
+            'loss_if_sp_pct': pnl_calc['loss_if_sp_pct'],
         }
 
-        # 🔴 التحقق من الحماية الصارمة أولاً (دائماً)
-        forced_decision = self._apply_hard_guards(trade, current_price, profit_pct)
-        if forced_decision:
-            final_decision = forced_decision
-            ai_recommendation = forced_decision
-            ai_confidence = 100
-            ai_explanation = "إغلاق إجباري بسبب كسر وقف الخسارة أو الخسارة القصوى."
-            management_score = 0
-            tp_probability = sl_probability = sideways_probability = reversal_probability = 0
-        else:
-            # 🔴 تحديد ما إذا كان يجب استدعاء AI أم لا (بناءً على الفاصل الزمني)
-            now = time.time()
-            last_ai = self.last_ai_time.get(trade_id, 0)
-            use_cached = (now - last_ai) < AI_DECISION_INTERVAL
+        # ─── استدعاء AI (مع التحكم في المعدل) ───
+        now = time.time()
+        last_ai = self.last_ai_time.get(trade_id, 0)
+        use_cached = (now - last_ai) < AI_DECISION_INTERVAL
 
-            if use_cached:
-                # استخدام آخر تحليل مخزن
-                logging.debug(f"⏳ Using cached AI analysis for {symbol} (last: {now - last_ai:.0f}s ago)")
-                cached = self.db.get_latest_open_analysis(trade_id)
-                if cached:
-                    ai_recommendation = cached.get('ai_decision', 'HOLD')
-                    ai_confidence = cached.get('ai_confidence', 50)
-                    ai_explanation = cached.get('ai_explanation', '')
-                    tp_probability = cached.get('probability_tp', 0)
-                    sl_probability = cached.get('probability_sl', 0)
-                    sideways_probability = cached.get('probability_sideways', 0)
-                    reversal_probability = cached.get('probability_reversal', 0)
-                else:
-                    # في حالة عدم وجود مخزن، نضطر لاستدعاء AI
-                    use_cached = False
+        if use_cached:
+            cached = self.db.get_latest_analysis(trade_id)
+            if cached:
+                ai_recommendation = cached.get('ai_decision', 'HOLD')
+                ai_confidence = cached.get('ai_confidence', 50)
+                ai_explanation = cached.get('ai_explanation', '')
+                tp_probability = cached.get('probability_tp', 0)
+                sl_probability = cached.get('probability_sl', 0)
+                sideways_probability = cached.get('probability_sideways', 0)
+                reversal_probability = cached.get('probability_reversal', 0)
+            else:
+                use_cached = False
 
-            if not use_cached:
-                # استدعاء AI مع قفل لمنع التزامن
-                with self.ai_lock:
-                    logging.info(f"🔄 Calling AI for {symbol} (last AI was {now - last_ai:.0f}s ago)")
-                    ai_result = self.ai.get_recommendation(current_data)
-                    self.last_ai_time[trade_id] = now
-                    ai_recommendation = ai_result.get('recommendation', 'HOLD')
-                    ai_confidence = ai_result.get('confidence', 0)
-                    ai_explanation = ai_result.get('reason', '')
-                    tp_probability = ai_result.get('tp_probability', 0)
-                    sl_probability = ai_result.get('sl_probability', 0)
-                    sideways_probability = ai_result.get('sideways_probability', 0)
-                    reversal_probability = ai_result.get('reversal_probability', 0)
+        if not use_cached:
+            with self.ai_lock:
+                logging.info(f"🔄 Calling AI for {symbol} (last AI was {now - last_ai:.0f}s ago)")
+                ai_result = self.ai.get_advice(current_data)
+                self.last_ai_time[trade_id] = now
+                ai_recommendation = ai_result.get('recommendation', 'HOLD')
+                ai_confidence = ai_result.get('confidence', 0)
+                ai_explanation = ai_result.get('reason', '')
+                tp_probability = ai_result.get('tp_probability', 0)
+                sl_probability = ai_result.get('sl_probability', 0)
+                sideways_probability = ai_result.get('sideways_probability', 0)
+                reversal_probability = ai_result.get('reversal_probability', 0)
 
-            # 🔴 حساب درجة الإدارة المستقلة (دائماً)
-            management_score = self._calculate_management_score(current_data)
+        # ─── حساب درجة التقييم ───
+        advisory_score = self._calculate_advisory_score({
+            'profit_pct': profit_pct,
+            'adx': adx,
+            'atr_pct': atr_pct,
+            'distance_to_sp_pct': dist_sp_pct,
+            'distance_to_tp_pct': dist_tp_pct,
+            'trend_alignment': trend_alignment,
+            'reversal_risk': reversal_risk,
+        })
 
-            # 🔴 القرار النهائي (يعتمد على AI والتقييم المستقل)
-            final_decision = self._decide_final(ai_recommendation, management_score, reversal_risk)
-
-            # 🔴 تسجيل القرار في قاعدة البيانات
-            decision_record = {
-                'trade_id': trade_id,
-                'symbol': symbol,
-                'decision': final_decision,
-                'confidence': ai_confidence,
-                'price': current_price,
-                'profit_pct': profit_pct,
-                'adx': adx,
-                'plus_di': plus_di,
-                'minus_di': minus_di,
-                'rsi': rsi,
-                'atr_pct': atr_pct,
-                'distance_sl': dist_sl_pct,
-                'distance_tp': dist_tp_pct,
-                'trend_alignment': trend_alignment,
-                'reversal_risk': reversal_risk,
-                'management_score': management_score,
-                'ai_recommendation': ai_recommendation,
-                'ai_confidence': ai_confidence,
-                'ai_explanation': ai_explanation,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            self.db.save_management_decision(decision_record)
-
-        # 🔴 طبقة التنفيذ (تطبق القرار النهائي مع احترام cooldown)
-        execution_result = self._execute_management_action(
-            trade=trade,
-            final_decision=final_decision,
-            current_price=current_price
-        )
-        logging.info(f"⚡ MANAGEMENT | {symbol} | Decision={final_decision} | Execution={execution_result}")
-
-        # تسجيل التنفيذ في قاعدة البيانات
-        if execution_result.get('executed', False) or not execution_result.get('success', True):
-            self.db.save_executed_action({
-                'trade_id': trade_id,
-                'symbol': symbol,
-                'action': final_decision,
-                'side': execution_result.get('side', ''),
-                'amount': execution_result.get('amount', 0),
-                'price': current_price,
-                'order_id': execution_result.get('order_id', ''),
-                'dry_run': execution_result.get('dry_run', DRY_RUN),
-                'success': execution_result.get('success', False),
-                'reason': execution_result.get('reason', ''),
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            })
-
-        # 🔴 حفظ التحليل الرئيسي (open_analysis) مع الاحتمالات الصحيحة
+        # ─── تسجيل التحليل في قاعدة البيانات ───
         analysis_record = {
             'trade_id': trade_id,
             'symbol': symbol,
             'side': side,
             'entry_price': entry_price,
             'current_price': current_price,
+            'sp_price': sp_price,
+            'tp_price': tp_price,
+            'profit_if_tp': pnl_calc['profit_if_tp'],
+            'loss_if_sp': pnl_calc['loss_if_sp'],
+            'profit_if_tp_pct': pnl_calc['profit_if_tp_pct'],
+            'loss_if_sp_pct': pnl_calc['loss_if_sp_pct'],
+            'position_size_usdt': pnl_calc['position_size_usdt'],
+            'leverage': leverage,
             'profit_pct': profit_pct,
             'time_open_minutes': int(time_open),
             'target_progress': target_progress,
             'trend_strength': adx,
             'momentum_score': rsi,
             'funding_rate': funding,
-            'oi_change_1h': 0.0,
-            'oi_trend': 0.0,
-            'apex_score': float(trade.get('confidence', 50)),
-            'iss_score': 50,
+            'market_regime': regime,
+            'atr_value': atr,
+            'atr_pct': atr_pct,
             'ai_decision': ai_recommendation,
             'ai_confidence': ai_confidence,
             'ai_explanation': ai_explanation,
-            'recommendation': final_decision,
-            'probability_tp': tp_probability if not forced_decision else 0,
-            'probability_sl': sl_probability if not forced_decision else 0,
-            'probability_sideways': sideways_probability if not forced_decision else 0,
-            'probability_reversal': reversal_probability if not forced_decision else 0,
+            'recommendation': ai_recommendation,
+            'probability_tp': tp_probability,
+            'probability_sl': sl_probability,
+            'probability_sideways': sideways_probability,
+            'probability_reversal': reversal_probability,
+            'risk_reward_ratio': rr_ratio,
+            'trend_alignment': trend_alignment,
+            'reversal_risk': reversal_risk,
+            'management_score': advisory_score,
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
-        self.db.save_open_analysis(analysis_record)
-        logging.info(f"✅ Decision saved for {symbol}: {final_decision} (AI: {ai_recommendation}, Score: {management_score:.1f}, Alignment: {trend_alignment}, Reversal Risk: {reversal_risk:.1f})")
+        self.db.save_kaf_analysis(analysis_record)
+
+        logging.info(
+            f"✅ KAF Analysis | {symbol} | SP={sp_price:.4f} | TP={tp_price:.4f} | "
+            f"Profit_IF_TP=+{pnl_calc['profit_if_tp']:.2f}USDT | Loss_IF_SP=-{pnl_calc['loss_if_sp']:.2f}USDT | "
+            f"AI={ai_recommendation} ({ai_confidence:.0f}%) | Score={advisory_score:.1f}"
+        )
 
 # =============================================================================
 # 🚀 MAIN
@@ -1511,7 +1062,8 @@ class MonitorLoop:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-    logging.info("🚀 Starting APEX Position Manager Bot v4.9 (Rate-Limited AI)")
+    logging.info("🚀 Starting APEX KAF ADVISOR BOT v5.0 (Advisory Only — No Execution)")
+    logging.info(f"📌 SP: ATR × {STOP_LOSS_ATR_MULTIPLE} | TP: ATR × {TAKE_PROFIT_ATR_MULTIPLE} (from QUANTUM APEX v4.0)")
 
     exchange_public = ccxt.binance({
         "enableRateLimit": True,
@@ -1529,11 +1081,8 @@ def main():
     db = MonitorDB(MONITOR_DB_PATH)
     analytics = AdvancedAnalyticsEngine(exchange_public)
     ai = AIClient()
-    execution_manager = BinanceExecutionManager()
 
-    logging.info(f"💱 Binance execution status: {execution_manager.status()}")
-
-    # اختبار الاتصال بالنموذج (مرة واحدة فقط)
+    # اختبار الاتصال بالنموذج
     try:
         logging.info(f"🧪 Testing {AI_MODEL} connection...")
         test_response = ai.client.chat.completions.create(
@@ -1545,14 +1094,16 @@ def main():
             extra_body={"chat_template_kwargs": {"enable_thinking": False}}
         )
         test_content = test_response.choices[0].message.content.strip()
-        logging.info(f"✅ TEST SUCCESS: {test_content}")
+        logging.info(f"✅ AI TEST SUCCESS: {test_content}")
     except Exception as e:
-        logging.error(f"❌ TEST FAILED: {type(e).__name__}: {e}")
-        logging.warning("⚠️ AI test failed, but bot will continue. Advice may show fallback values.")
+        logging.error(f"❌ AI TEST FAILED: {type(e).__name__}: {e}")
+        logging.warning("⚠️ AI test failed, but bot will continue.")
 
-    monitor = MonitorLoop(db, analytics, ai, execution_manager)
-    monitor.start()
+    # بدء حلقة المراقبة الاستشارية
+    advisor = AdvisorLoop(db, analytics, ai)
+    advisor.start()
 
+    # بدء بوت تيليجرام
     telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db, analytics)
     telegram_bot.run()
 
