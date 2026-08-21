@@ -1101,7 +1101,7 @@ def main():
 
     # بدء حلقة المراقبة الاستشارية
     advisor = AdvisorLoop(db, analytics, ai)
-    advisor.start()
+    advisor.start()jjjjjjjjjjjjjjjuyg;:+-&&__&&&-+9876¥^÷÷√
 
     # بدء بوت تيليجرام
     telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db, analytics)
