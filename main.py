@@ -45,7 +45,7 @@ DATABASE_URL = os.getenv(
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
 # ============================================================
-# AI AGENTS (4 independent models)
+# AI AGENTS (4 independent models) - مع إعدادات المحاولات
 # ============================================================
 
 AGENTS = [
@@ -57,6 +57,8 @@ AGENTS = [
         "temperature": 1.0,
         "reasoning_effort": "high",
         "max_tokens": 16384,
+        "max_attempts": 3,           # عدد المحاولات
+        "request_timeout": 300,       # 5 دقائق لكل محاولة
     },
     {
         "id": 2,
@@ -66,6 +68,8 @@ AGENTS = [
         "temperature": 1.0,
         "reasoning_effort": "high",
         "max_tokens": 16384,
+        "max_attempts": 3,
+        "request_timeout": 300,
     },
     {
         "id": 3,
@@ -75,6 +79,8 @@ AGENTS = [
         "temperature": 1.0,
         "reasoning_effort": "max",
         "max_tokens": 16384,
+        "max_attempts": 3,
+        "request_timeout": 300,
     },
     {
         "id": 4,
@@ -84,10 +90,10 @@ AGENTS = [
         "temperature": 1.0,
         "reasoning_effort": None,
         "max_tokens": 16384,
+        "max_attempts": 2,           # نموذج أسرع
+        "request_timeout": 180,       # 3 دقائق
     },
 ]
-
-AGENT_TIMEOUT = 120
 
 # ============================================================
 # MARKET CONFIG (USDⓈ-M Futures) - 30 Symbols
@@ -361,9 +367,6 @@ def save_trades_batch(algorithm_id, trades):
     except Exception as e:
         logging.error("❌ Failed to save trades: %s", e)
 
-# بقية دوال المساعدة (get_best_algorithm, إلخ) ستبقى كما هي مع إضافة try/except
-# للتجنب الانهيار عند فشل الاتصال.
-
 def get_best_algorithm():
     try:
         conn = db_connect()
@@ -624,7 +627,7 @@ MARKET DATA SNAPSHOT:
 {json.dumps(features, indent=2)[:12000]} """
 
 # ============================================================
-# NVIDIA AI CALL
+# NVIDIA AI CALL (الدالة المتزامنة الأساسية)
 # ============================================================
 
 def call_agent_sync(agent, features):
@@ -644,33 +647,72 @@ def call_agent_sync(agent, features):
     if agent.get("reasoning_effort"):
         payload["reasoning_effort"] = agent["reasoning_effort"]
 
-    response = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=110)
+    response = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=agent.get("request_timeout", 110))
     response.raise_for_status()
     data = response.json()
     return data["choices"][0]["message"]["content"]
 
-async def run_agent(agent, features):
-    start = time.time()
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(call_agent_sync, agent, features),
-            timeout=AGENT_TIMEOUT
-        )
-        duration = int((time.time() - start) * 1000)
-        log_agent(agent, "SUCCESS", "Algorithm generated", duration)
-        state["agents_ok"] += 1
-        return {"agent": agent, "status": "SUCCESS", "content": result}
-    except asyncio.TimeoutError:
-        duration = int((time.time() - start) * 1000)
-        log_agent(agent, "TIMEOUT", "Agent skipped", duration)
-        state["agents_failed"] += 1
-        return {"agent": agent, "status": "TIMEOUT", "content": None}
-    except Exception as e:
-        duration = int((time.time() - start) * 1000)
-        log_agent(agent, "FAILED", str(e), duration)
-        state["agents_failed"] += 1
-        logging.error("%s FAILED: %s", agent["name"], e)
-        return {"agent": agent, "status": "FAILED", "content": None}
+# ============================================================
+# RUN AGENT WITH RETRIES (NEW LOGIC)
+# ============================================================
+
+async def run_agent_with_retries(agent, features):
+    """
+    تنفيذ طلب الوكيل مع إعادة محاولات ذكية:
+    - مهلة لكل محاولة = agent['request_timeout'] (افتراضي 300 ثانية)
+    - عدد المحاولات = agent['max_attempts'] (افتراضي 3)
+    - انتظار تصاعدي بين المحاولات: 15 * رقم_المحاولة ثانية
+    - إذا نجحت محاولة (رد غير فارغ وطول > 50) نخرج فوراً.
+    - إذا فشلت كل المحاولات نعيد FAILED.
+    """
+    agent_name = agent["name"]
+    max_attempts = agent.get("max_attempts", 3)
+    timeout = agent.get("request_timeout", 300)
+    start_total = time.time()
+
+    for attempt in range(1, max_attempts + 1):
+        logging.info(f"🤖 {agent_name} | محاولة {attempt}/{max_attempts}")
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(call_agent_sync, agent, features),
+                timeout=timeout
+            )
+            # التحقق من صحة الرد (غير فارغ وطوله كاف)
+            if result and len(str(result).strip()) > 50:
+                duration = int((time.time() - start_total) * 1000)
+                log_agent(agent, "SUCCESS", f"Attempt {attempt} succeeded", duration)
+                state["agents_ok"] += 1
+                logging.info(f"✅ {agent_name} نجح في المحاولة {attempt}")
+                return {
+                    "agent": agent,
+                    "status": "SUCCESS",
+                    "attempt": attempt,
+                    "content": result,
+                }
+            else:
+                logging.warning(f"⚠️ {agent_name} أعاد ردًا فارغًا أو غير صالح في المحاولة {attempt}")
+        except asyncio.TimeoutError:
+            logging.warning(f"⏱ {agent_name} انتهت مهلة المحاولة {attempt} ({timeout}s)")
+        except Exception as e:
+            logging.warning(f"⚠️ {agent_name} خطأ في المحاولة {attempt}: {e}")
+
+        # إذا لم تكن المحاولة الأخيرة، ننتظر قبل إعادة المحاولة
+        if attempt < max_attempts:
+            wait = 15 * attempt
+            logging.info(f"⏳ {agent_name} ينتظر {wait} ثانية قبل المحاولة التالية")
+            await asyncio.sleep(wait)
+
+    # انتهت جميع المحاولات دون نجاح
+    duration = int((time.time() - start_total) * 1000)
+    log_agent(agent, "FAILED", f"All {max_attempts} attempts failed", duration)
+    state["agents_failed"] += 1
+    logging.error(f"❌ {agent_name} فشل بعد {max_attempts} محاولات")
+    return {
+        "agent": agent,
+        "status": "FAILED",
+        "attempt": max_attempts,
+        "content": None,
+    }
 
 # ============================================================
 # PARSE AI OUTPUT
@@ -895,7 +937,7 @@ def backtest(symbol, code, algorithm_id=None):
     return result
 
 # ============================================================
-# MAIN AI RESEARCH CYCLE
+# MAIN AI RESEARCH CYCLE (مع استخدام الدالة الجديدة)
 # ============================================================
 
 async def research_cycle():
@@ -907,8 +949,9 @@ async def research_cycle():
         if not features:
             continue
 
+        # تشغيل جميع الوكلاء بالتوازي باستخدام الدالة الجديدة
         tasks = [
-            run_agent(agent, features)
+            run_agent_with_retries(agent, features)
             for agent in AGENTS
             if not agent["api_key"].startswith("PUT_")
         ]
@@ -916,6 +959,7 @@ async def research_cycle():
 
         for result in results:
             if isinstance(result, Exception):
+                logging.error("❌ Agent task raised exception: %s", result)
                 continue
             if result["status"] != "SUCCESS":
                 continue
