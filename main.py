@@ -19,6 +19,7 @@ import pandas as pd
 import psycopg2
 import psycopg2.extras
 import websockets
+import ccxt.async_support as ccxt  # استيراد CCXT للبيانات التاريخية
 
 # ============================================================
 # CONFIG
@@ -411,6 +412,53 @@ def get_algorithms_list(limit=5):
     except Exception as e:
         logging.warning("⚠️ Could not fetch algorithm list: %s", e)
         return []
+
+# ============================================================
+# CCXT - PRELOAD HISTORICAL DATA
+# ============================================================
+
+async def preload_market_data(symbol, exchange):
+    """
+    جلب آخر 500 شمعة 1M من Binance USDT-M Futures وتخزينها في market_cache.
+    """
+    try:
+        # تحويل الرمز إلى صيغة CCXT (مثل btcusdt → BTC/USDT)
+        ccxt_symbol = symbol.upper().replace("USDT", "/USDT")
+        logging.info(f"📥 Loading historical data: {ccxt_symbol}")
+
+        ohlcv = await exchange.fetch_ohlcv(
+            ccxt_symbol,
+            timeframe="1m",
+            limit=500,
+            params={"method": "fetchIndexOHLCV"}  # شموع سعر المؤشر (مناسبة للعقود)
+        )
+
+        if ohlcv and len(ohlcv) >= 50:
+            # تحويل البيانات إلى نفس هيكل WebSocket (قاموس)
+            candles = []
+            for candle in ohlcv:
+                candles.append({
+                    "open_time": candle[0],
+                    "open": candle[1],
+                    "high": candle[2],
+                    "low": candle[3],
+                    "close": candle[4],
+                    "volume": candle[5],
+                })
+            # تخزين في market_cache
+            market_cache["candles_1m"][symbol].clear()
+            market_cache["candles_1m"][symbol].extend(candles)
+            # تحديث السعر الحالي
+            market_cache["prices"][symbol] = candles[-1]["close"]
+
+            logging.info(f"✅ {symbol}: loaded {len(candles)} candles")
+            return True
+        else:
+            logging.warning(f"⚠️ {symbol}: only received {len(ohlcv) if ohlcv else 0} candles")
+            return False
+    except Exception as e:
+        logging.error(f"❌ Historical data failed for {symbol}: {e}")
+        return False
 
 # ============================================================
 # BINANCE USDⓈ-M WEBSOCKET
@@ -907,7 +955,7 @@ def backtest(symbol, code, algorithm_id=None):
     return result
 
 # ============================================================
-# MAIN AI RESEARCH CYCLE (مع لوقات تفصيلية)
+# MAIN AI RESEARCH CYCLE
 # ============================================================
 
 async def research_cycle():
@@ -1130,10 +1178,10 @@ Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent
 async def main():
     logging.info("%s STARTING", APP_NAME)
 
+    # تهيئة قاعدة البيانات
     db_url = os.getenv("DATABASE_URL")
     if not db_url or db_url.startswith("postgresql://USER:"):
         logging.error("❌ DATABASE_URL is not set or is invalid. Please set it in Railway environment variables.")
-        logging.error("   Example: postgresql://user:pass@host:port/dbname")
     else:
         try:
             success = await asyncio.to_thread(init_database)
@@ -1144,6 +1192,25 @@ async def main():
         except Exception as e:
             logging.error("❌ Exception during database init: %s", e)
 
+    # جلب البيانات التاريخية باستخدام CCXT
+    logging.info("📥 Preloading historical market data from Binance USDT-M Futures...")
+    exchange = ccxt.binanceusdm({
+        "enableRateLimit": True,
+        "timeout": 30000,
+    })
+
+    preload_tasks = [
+        preload_market_data(symbol, exchange)
+        for symbol in SYMBOLS
+    ]
+    results = await asyncio.gather(*preload_tasks, return_exceptions=True)
+    ready_count = sum(1 for r in results if r is True)
+    logging.info(f"📊 MARKET CACHE READY: {ready_count}/{len(SYMBOLS)}")
+
+    # إغلاق اتصال CCXT
+    await exchange.close()
+
+    # تشغيل المهام الأساسية
     await asyncio.gather(
         websocket_worker(),
         research_loop(),
