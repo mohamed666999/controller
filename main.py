@@ -57,8 +57,8 @@ AGENTS = [
         "temperature": 1.0,
         "reasoning_effort": "high",
         "max_tokens": 16384,
-        "max_attempts": 3,           # عدد المحاولات
-        "request_timeout": 300,       # 5 دقائق لكل محاولة
+        "max_attempts": 3,
+        "request_timeout": 300,
     },
     {
         "id": 2,
@@ -90,8 +90,8 @@ AGENTS = [
         "temperature": 1.0,
         "reasoning_effort": None,
         "max_tokens": 16384,
-        "max_attempts": 2,           # نموذج أسرع
-        "request_timeout": 180,       # 3 دقائق
+        "max_attempts": 2,
+        "request_timeout": 180,
     },
 ]
 
@@ -169,7 +169,6 @@ state = {
 # ============================================================
 
 def db_connect():
-    """محاولة الاتصال بقاعدة البيانات مع تسجيل الأخطاء"""
     try:
         return psycopg2.connect(DATABASE_URL)
     except Exception as e:
@@ -178,12 +177,10 @@ def db_connect():
         raise
 
 def init_database():
-    """إنشاء الجداول مع تسجيل الأخطاء وعدم التوقف"""
     try:
         conn = db_connect()
         logging.info("✅ Connected to database successfully")
         cur = conn.cursor()
-
         sql = """
         CREATE TABLE IF NOT EXISTS algorithms (
             id BIGSERIAL PRIMARY KEY,
@@ -256,18 +253,16 @@ def init_database():
         conn.close()
         logging.info("✅ All tables created successfully")
         return True
-
     except Exception as e:
         logging.error("❌ init_database FAILED: %s", e)
         logging.error(traceback.format_exc())
         return False
 
 # ============================================================
-# DATABASE HELPERS (مع تحسينات للتعامل مع فشل الاتصال)
+# DATABASE HELPERS
 # ============================================================
 
 def log_agent(agent, status, message, duration_ms=0):
-    """تسجيل سجل الوكيل، مع تجاهل الأخطاء إذا فشلت قاعدة البيانات"""
     try:
         conn = db_connect()
         cur = conn.cursor()
@@ -286,7 +281,6 @@ def log_agent(agent, status, message, duration_ms=0):
         logging.warning("⚠️ Could not log to database: %s", e)
 
 def save_algorithm(agent, symbol, hypothesis, code):
-    """حفظ الخوارزمية، مع إرجاع None إذا فشل"""
     try:
         conn = db_connect()
         cur = conn.cursor()
@@ -309,7 +303,6 @@ def save_algorithm(agent, symbol, hypothesis, code):
         return None
 
 def update_algorithm_score(algorithm_id, result):
-    """تحديث نتيجة الاختبار، مع تجاهل الأخطاء"""
     if algorithm_id is None:
         return
     try:
@@ -342,7 +335,6 @@ def update_algorithm_score(algorithm_id, result):
         logging.error("❌ Failed to update algorithm score: %s", e)
 
 def save_trades_batch(algorithm_id, trades):
-    """حفظ صفقات محاكاة، مع تجاهل الأخطاء"""
     if not trades or algorithm_id is None:
         return
     try:
@@ -446,7 +438,6 @@ async def websocket_worker():
                     symbol = data.get("s", "").lower()
                     if not symbol:
                         continue
-
                     if "@trade" in stream:
                         price = float(data["p"])
                         market_cache["prices"][symbol] = price
@@ -627,7 +618,7 @@ MARKET DATA SNAPSHOT:
 {json.dumps(features, indent=2)[:12000]} """
 
 # ============================================================
-# NVIDIA AI CALL (الدالة المتزامنة الأساسية)
+# NVIDIA AI CALL
 # ============================================================
 
 def call_agent_sync(agent, features):
@@ -653,36 +644,27 @@ def call_agent_sync(agent, features):
     return data["choices"][0]["message"]["content"]
 
 # ============================================================
-# RUN AGENT WITH RETRIES (NEW LOGIC)
+# RUN AGENT WITH RETRIES
 # ============================================================
 
 async def run_agent_with_retries(agent, features):
-    """
-    تنفيذ طلب الوكيل مع إعادة محاولات ذكية:
-    - مهلة لكل محاولة = agent['request_timeout'] (افتراضي 300 ثانية)
-    - عدد المحاولات = agent['max_attempts'] (افتراضي 3)
-    - انتظار تصاعدي بين المحاولات: 15 * رقم_المحاولة ثانية
-    - إذا نجحت محاولة (رد غير فارغ وطول > 50) نخرج فوراً.
-    - إذا فشلت كل المحاولات نعيد FAILED.
-    """
     agent_name = agent["name"]
     max_attempts = agent.get("max_attempts", 3)
     timeout = agent.get("request_timeout", 300)
     start_total = time.time()
 
     for attempt in range(1, max_attempts + 1):
-        logging.info(f"🤖 {agent_name} | محاولة {attempt}/{max_attempts}")
+        logging.info(f"🤖 {agent_name} | Attempt {attempt}/{max_attempts}")
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(call_agent_sync, agent, features),
                 timeout=timeout
             )
-            # التحقق من صحة الرد (غير فارغ وطوله كاف)
             if result and len(str(result).strip()) > 50:
                 duration = int((time.time() - start_total) * 1000)
                 log_agent(agent, "SUCCESS", f"Attempt {attempt} succeeded", duration)
                 state["agents_ok"] += 1
-                logging.info(f"✅ {agent_name} نجح في المحاولة {attempt}")
+                logging.info(f"✅ {agent_name} succeeded on attempt {attempt}")
                 return {
                     "agent": agent,
                     "status": "SUCCESS",
@@ -690,23 +672,21 @@ async def run_agent_with_retries(agent, features):
                     "content": result,
                 }
             else:
-                logging.warning(f"⚠️ {agent_name} أعاد ردًا فارغًا أو غير صالح في المحاولة {attempt}")
+                logging.warning(f"⚠️ {agent_name} returned empty or invalid response on attempt {attempt}")
         except asyncio.TimeoutError:
-            logging.warning(f"⏱ {agent_name} انتهت مهلة المحاولة {attempt} ({timeout}s)")
+            logging.warning(f"⏱ {agent_name} timeout on attempt {attempt} ({timeout}s)")
         except Exception as e:
-            logging.warning(f"⚠️ {agent_name} خطأ في المحاولة {attempt}: {e}")
+            logging.warning(f"⚠️ {agent_name} error on attempt {attempt}: {e}")
 
-        # إذا لم تكن المحاولة الأخيرة، ننتظر قبل إعادة المحاولة
         if attempt < max_attempts:
             wait = 15 * attempt
-            logging.info(f"⏳ {agent_name} ينتظر {wait} ثانية قبل المحاولة التالية")
+            logging.info(f"⏳ {agent_name} waiting {wait}s before next attempt")
             await asyncio.sleep(wait)
 
-    # انتهت جميع المحاولات دون نجاح
     duration = int((time.time() - start_total) * 1000)
     log_agent(agent, "FAILED", f"All {max_attempts} attempts failed", duration)
     state["agents_failed"] += 1
-    logging.error(f"❌ {agent_name} فشل بعد {max_attempts} محاولات")
+    logging.error(f"❌ {agent_name} failed after {max_attempts} attempts")
     return {
         "agent": agent,
         "status": "FAILED",
@@ -786,14 +766,10 @@ def run_algorithm(code, df):
     return signals.clip(-1, 1).fillna(0)
 
 # ============================================================
-# BACKTEST with TP/SL and trade recording
+# BACKTEST
 # ============================================================
 
 def backtest(symbol, code, algorithm_id=None):
-    """
-    تشغيل backtest على بيانات الشموع المخزنة.
-    تعيد قاموس النتائج، وتحفظ الصفقات في قاعدة البيانات إذا تم تمرير algorithm_id.
-    """
     candles = list(market_cache["candles_1m"][symbol])
     if len(candles) < 200:
         return {
@@ -833,10 +809,9 @@ def backtest(symbol, code, algorithm_id=None):
     losses = 0
     profits = []
     loss_sum = 0.0
-    TP = 0.004   # 0.4% Take Profit
-    SL = 0.0025  # 0.25% Stop Loss
-
-    trades_record = []   # لتخزين الصفقات قبل الحفظ
+    TP = 0.004
+    SL = 0.0025
+    trades_record = []
 
     for i in range(50, len(df) - 1):
         price = float(df["close"].iloc[i])
@@ -868,7 +843,7 @@ def backtest(symbol, code, algorithm_id=None):
                     exit_price = position["sl"]
                 elif high >= position["tp"]:
                     exit_price = position["tp"]
-            else:  # SHORT
+            else:
                 if high >= position["sl"]:
                     exit_price = position["sl"]
                 elif low <= position["tp"]:
@@ -883,7 +858,6 @@ def backtest(symbol, code, algorithm_id=None):
 
                 equity *= (1 + pnl_pct)
                 profits.append(pnl_pct)
-
                 if pnl_pct > 0:
                     wins += 1
                 else:
@@ -894,7 +868,6 @@ def backtest(symbol, code, algorithm_id=None):
                 dd = (peak - equity) / peak
                 max_drawdown = max(max_drawdown, dd)
 
-                # تسجيل الصفقة
                 trade_record = {
                     "symbol": symbol.upper(),
                     "side": position["side"],
@@ -908,14 +881,12 @@ def backtest(symbol, code, algorithm_id=None):
                     "closed_at": df["open_time"].iloc[i],
                 }
                 trades_record.append(trade_record)
-
                 position = None
 
     total = wins + losses
     win_rate = wins / total * 100 if total else 0
     profit_sum = sum(x for x in profits if x > 0)
     profit_factor = profit_sum / loss_sum if loss_sum > 0 else profit_sum
-
     score = win_rate * 0.40 + min(profit_factor, 5) * 10 - max_drawdown * 100 * 0.30
 
     result = {
@@ -930,36 +901,41 @@ def backtest(symbol, code, algorithm_id=None):
         "trades": trades_record,
     }
 
-    # حفظ الصفقات في قاعدة البيانات إذا كان لدينا algorithm_id
     if algorithm_id and trades_record:
         save_trades_batch(algorithm_id, trades_record)
 
     return result
 
 # ============================================================
-# MAIN AI RESEARCH CYCLE (مع استخدام الدالة الجديدة)
+# MAIN AI RESEARCH CYCLE (مع لوقات تفصيلية)
 # ============================================================
 
 async def research_cycle():
     state["cycle"] += 1
-    logging.info("STARTING AI RESEARCH CYCLE %s", state["cycle"])
+    cycle_num = state["cycle"]
+    logging.info(f"🔬 CYCLE {cycle_num} START")
 
     for symbol in SYMBOLS:
+        logging.info(f"📊 Preparing market data for {symbol}...")
         features = calculate_features(symbol)
         if not features:
+            logging.warning(f"⚠️ No enough data for {symbol}, skipping")
             continue
+        logging.info(f"📊 Market data ready for {symbol} (candles: {features['candles']}, trades: {features['trades']})")
 
-        # تشغيل جميع الوكلاء بالتوازي باستخدام الدالة الجديدة
+        logging.info(f"🤖 Starting AI agents for {symbol}...")
         tasks = [
             run_agent_with_retries(agent, features)
             for agent in AGENTS
             if not agent["api_key"].startswith("PUT_")
         ]
+        logging.info(f"🚀 All {len(tasks)} AI tasks created for {symbol}, awaiting results...")
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        logging.info(f"🏁 All AI tasks finished for {symbol}")
 
         for result in results:
             if isinstance(result, Exception):
-                logging.error("❌ Agent task raised exception: %s", result)
+                logging.error(f"❌ Agent task raised exception: {result}")
                 continue
             if result["status"] != "SUCCESS":
                 continue
@@ -975,9 +951,7 @@ async def research_cycle():
             if algorithm_id is None:
                 continue
 
-            # Backtest مع حفظ الصفقات
             result_bt = backtest(symbol, code, algorithm_id=algorithm_id)
-
             update_algorithm_score(algorithm_id, result_bt)
 
             logging.info(
@@ -987,6 +961,7 @@ async def research_cycle():
             )
 
     state["last_cycle"] = datetime.now(timezone.utc)
+    logging.info(f"🔬 CYCLE {cycle_num} COMPLETE")
 
 # ============================================================
 # RESEARCH LOOP
@@ -995,13 +970,15 @@ async def research_cycle():
 async def research_loop():
     while True:
         try:
+            logging.info("⏳ Waiting for research cycle...")
             await research_cycle()
         except Exception:
             logging.error(traceback.format_exc())
-        await asyncio.sleep(30 * 60)  # كل 30 دقيقة
+        logging.info("⏳ Sleeping for 30 minutes until next cycle")
+        await asyncio.sleep(30 * 60)
 
 # ============================================================
-# TELEGRAM API (بدون مكتبة إضافية)
+# TELEGRAM API
 # ============================================================
 
 TELEGRAM_OFFSET = 0
@@ -1023,8 +1000,6 @@ async def telegram_loop():
                 "getUpdates",
                 {"offset": TELEGRAM_OFFSET, "timeout": 30}
             )
-
-            # تسجيل كل تحديث يرد من Telegram
             logging.info("📩 TELEGRAM UPDATE: %s", data)
 
             for update in data.get("result", []):
@@ -1036,7 +1011,6 @@ async def telegram_loop():
                 if not chat_id:
                     continue
 
-                # /status
                 if text == "/status":
                     uptime = datetime.now(timezone.utc) - state["started_at"]
                     reply = f"""
@@ -1056,7 +1030,6 @@ async def telegram_loop():
 """
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
-                # /best أو /scalping
                 elif text in ["/best", "/scalping"]:
                     best = await asyncio.to_thread(get_best_algorithm)
                     if not best:
@@ -1079,7 +1052,6 @@ ID: {best["id"]}
 """
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
-                # /code ID
                 elif text.startswith("/code"):
                     parts = text.split()
                     if len(parts) < 2:
@@ -1102,7 +1074,6 @@ ID: {best["id"]}
                             reply = f"💻 ALGORITHM #{algo['id']}\n\n{algo['code']}"
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
-                # /trades
                 elif text == "/trades":
                     trades = await asyncio.to_thread(get_recent_trades, 10)
                     if not trades:
@@ -1120,7 +1091,6 @@ Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent
                         reply = "\n".join(lines)
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
-                # /list لعرض آخر 5 خوارزميات
                 elif text == "/list":
                     algos = await asyncio.to_thread(get_algorithms_list, 5)
                     if not algos:
@@ -1134,7 +1104,6 @@ Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent
                         reply = "\n".join(lines)
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
-                # /help
                 elif text in ["/start", "/help"]:
                     reply = """
 🤖 AI ALGORITHM LAB
@@ -1161,12 +1130,10 @@ Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent
 async def main():
     logging.info("%s STARTING", APP_NAME)
 
-    # التحقق من DATABASE_URL
     db_url = os.getenv("DATABASE_URL")
     if not db_url or db_url.startswith("postgresql://USER:"):
         logging.error("❌ DATABASE_URL is not set or is invalid. Please set it in Railway environment variables.")
         logging.error("   Example: postgresql://user:pass@host:port/dbname")
-        # نستمر بدون قاعدة بيانات للاختبار
     else:
         try:
             success = await asyncio.to_thread(init_database)
@@ -1177,7 +1144,6 @@ async def main():
         except Exception as e:
             logging.error("❌ Exception during database init: %s", e)
 
-    # تشغيل المهام الأساسية
     await asyncio.gather(
         websocket_worker(),
         research_loop(),
