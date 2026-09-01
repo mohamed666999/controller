@@ -164,11 +164,13 @@ state = {
 # ============================================================
 
 def db_connect():
+    # منع محاولة الاتصال إذا كان الرابط هو الوهمي لعدم تدمير البوت برسائل الخطأ
+    if not DATABASE_URL or "USER:PASSWORD@HOST:PORT" in DATABASE_URL:
+        raise ValueError("Invalid DATABASE_URL. Please set the real PostgreSQL URL.")
     try:
         return psycopg2.connect(DATABASE_URL)
     except Exception as e:
         logging.error("❌ Database connection failed: %s", e)
-        logging.error(traceback.format_exc())
         raise
 
 def init_database():
@@ -250,7 +252,6 @@ def init_database():
         return True
     except Exception as e:
         logging.error("❌ init_database FAILED: %s", e)
-        logging.error(traceback.format_exc())
         return False
 
 # ============================================================
@@ -408,7 +409,7 @@ def get_algorithms_list(limit=5):
         return []
 
 # ============================================================
-# CCXT - PRELOAD HISTORICAL DATA (تم إزالة الباراميتر غير المدعوم)
+# CCXT - PRELOAD HISTORICAL DATA 
 # ============================================================
 
 async def preload_market_data(symbol, exchange):
@@ -1043,7 +1044,20 @@ async def telegram_loop():
                 "getUpdates",
                 {"offset": TELEGRAM_OFFSET, "timeout": 30}
             )
-            logging.info("📩 TELEGRAM UPDATE: %s", data)
+            
+            # حماية البوت من التوقف في حال وجود نسختين (Conflict 409)
+            if data and not data.get("ok"):
+                if data.get("error_code") == 409:
+                    logging.error("🚨 TELEGRAM CONFLICT: Multiple instances running! Please STOP your local bot.")
+                    await asyncio.sleep(15)
+                else:
+                    logging.error("TELEGRAM ERROR: %s", data)
+                    await asyncio.sleep(5)
+                continue
+
+            # تخفيف رسائل اللوج: يطبع فقط إذا كان هناك أمر جديد بدلاً من طباعة [] كل ثانية
+            if data.get("result"):
+                logging.info("📩 TELEGRAM UPDATE: %s", data)
 
             for update in data.get("result", []):
                 TELEGRAM_OFFSET = update["update_id"] + 1
