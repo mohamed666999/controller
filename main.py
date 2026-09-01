@@ -1,1111 +1,1104 @@
-#!/usr/bin/env python3
-"""
-╔══════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                          ║
-║     APEX KAF ADVISOR BOT v5.0 — استشاري الصفقات الذكي (بدون تنفيذ)                      ║
-║                                                                                          ║
-║  Architecture: Advisory-Only + AI Analysis + SP/TP from QUANTUM APEX v4.0               ║
-║  AI Model: poolside/laguna-xs-2.1                                                       ║
-║                                                                                          ║
-║  ⚠️ هذا البوت لا ينفذ أي صفقات — مراقب ومستشار فقط                                     ║
-║                                                                                          ║
-╚══════════════════════════════════════════════════════════════════════════════════════════╝
-"""
+# ============================================================
+# AI ALGORITHM LAB - main.py
+# Binance USDⓈ-M Futures + NVIDIA AI + PostgreSQL + Telegram
+# ============================================================
 
 import os
-import sys
-import time
 import json
+import time
+import math
+import asyncio
 import logging
-import threading
-import sqlite3
 import traceback
-import numpy as np
-import requests
-import ccxt
+from collections import deque
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
-from queue import Queue
-from functools import wraps
 
-from openai import OpenAI
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import requests
+import numpy as np
+import pandas as pd
+import psycopg2
+import psycopg2.extras
+import websockets
 
-# =============================================================================
-# 🌐 عرض IP فور بدء التشغيل
-# =============================================================================
+# ============================================================
+# CONFIG
+# ============================================================
 
-def get_public_ip():
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+APP_NAME = "AI ALGORITHM LAB"
+
+# ------------------------------------------------------------
+# PUT YOUR KEYS HERE (as requested)
+# ------------------------------------------------------------
+
+TELEGRAM_TOKEN = "8688907472:AAHOsxXowXD4HD2GiV5CgPYLHLKx5HJLbi8"
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://USER:PASSWORD@HOST:PORT/DATABASE"
+)
+
+NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+
+# ============================================================
+# AI AGENTS (4 independent models)
+# ============================================================
+
+AGENTS = [
+    {
+        "id": 1,
+        "name": "DEEPSEEK_1",
+        "model": "deepseek-ai/deepseek-v4-flash-0731",
+        "api_key": "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",
+        "temperature": 1.0,
+        "reasoning_effort": "high",
+        "max_tokens": 16384,
+    },
+    {
+        "id": 2,
+        "name": "DEEPSEEK_2",
+        "model": "deepseek-ai/deepseek-v4-flash-0731",
+        "api_key": "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",
+        "temperature": 1.0,
+        "reasoning_effort": "high",
+        "max_tokens": 16384,
+    },
+    {
+        "id": 3,
+        "name": "KIMI",
+        "model": "moonshotai/kimi-k3",
+        "api_key": "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",
+        "temperature": 1.0,
+        "reasoning_effort": "max",
+        "max_tokens": 16384,
+    },
+    {
+        "id": 4,
+        "name": "LLAMA",
+        "model": "meta/llama-3.2-90b-vision-instruct",
+        "api_key": "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",
+        "temperature": 1.0,
+        "reasoning_effort": None,
+        "max_tokens": 16384,
+    },
+]
+
+AGENT_TIMEOUT = 120
+
+# ============================================================
+# MARKET CONFIG (USDⓈ-M Futures) - 30 Symbols
+# ============================================================
+
+SYMBOLS = [
+    "btcusdt",
+    "ethusdt",
+    "solusdt",
+    "xrpusdt",
+    "adausdt",
+    "dogeusdt",
+    "dotusdt",
+    "avaxusdt",
+    "maticusdt",
+    "linkusdt",
+    "uniusdt",
+    "atomusdt",
+    "ltcusdt",
+    "bchusdt",
+    "nearusdt",
+    "filusdt",
+    "aptusdt",
+    "arbusdt",
+    "opusdt",
+    "vetusdt",
+    "icpusdt",
+    "etcusdt",
+    "xlmusdt",
+    "thetausdt",
+    "runeusdt",
+    "aaveusdt",
+    "mkrusdt",
+    "crvusdt",
+    "sushiusdt",
+    "1inchusdt",
+]
+
+BINANCE_WS = (
+    "wss://fstream.binance.com/stream?streams="
+)
+
+CACHE_SIZE = 5000
+
+market_cache = {
+    "trades": {},
+    "depth": {},
+    "candles_1m": {},
+    "prices": {},
+}
+
+for symbol in SYMBOLS:
+    market_cache["trades"][symbol] = deque(maxlen=CACHE_SIZE)
+    market_cache["depth"][symbol] = deque(maxlen=500)
+    market_cache["candles_1m"][symbol] = deque(maxlen=3000)
+    market_cache["prices"][symbol] = 0.0
+
+# ============================================================
+# LAB STATE
+# ============================================================
+
+state = {
+    "started_at": datetime.now(timezone.utc),
+    "cycle": 0,
+    "agents_ok": 0,
+    "agents_failed": 0,
+    "last_cycle": None,
+    "best_algorithm_id": None,
+}
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+def db_connect():
+    return psycopg2.connect(DATABASE_URL)
+
+def init_database():
+    sql = """
+    CREATE TABLE IF NOT EXISTS algorithms (
+        id BIGSERIAL PRIMARY KEY,
+        lab TEXT NOT NULL,
+        symbol TEXT,
+        agent_id INTEGER,
+        agent_name TEXT,
+        model_name TEXT,
+        hypothesis TEXT,
+        code TEXT NOT NULL,
+        score DOUBLE PRECISION DEFAULT 0,
+        win_rate DOUBLE PRECISION DEFAULT 0,
+        profit_factor DOUBLE PRECISION DEFAULT 0,
+        max_drawdown DOUBLE PRECISION DEFAULT 0,
+        status TEXT DEFAULT 'RESEARCH',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_logs (
+        id BIGSERIAL PRIMARY KEY,
+        agent_id INTEGER,
+        agent_name TEXT,
+        status TEXT,
+        message TEXT,
+        duration_ms BIGINT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS backtests (
+        id BIGSERIAL PRIMARY KEY,
+        algorithm_id BIGINT REFERENCES algorithms(id),
+        symbol TEXT,
+        total_trades INTEGER DEFAULT 0,
+        wins INTEGER DEFAULT 0,
+        losses INTEGER DEFAULT 0,
+        win_rate DOUBLE PRECISION DEFAULT 0,
+        profit_factor DOUBLE PRECISION DEFAULT 0,
+        max_drawdown DOUBLE PRECISION DEFAULT 0,
+        score DOUBLE PRECISION DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS paper_trades (
+        id BIGSERIAL PRIMARY KEY,
+        algorithm_id BIGINT REFERENCES algorithms(id),
+        symbol TEXT,
+        side TEXT,
+        entry_price DOUBLE PRECISION,
+        take_profit DOUBLE PRECISION,
+        stop_loss DOUBLE PRECISION,
+        exit_price DOUBLE PRECISION,
+        status TEXT DEFAULT 'OPEN',
+        pnl_percent DOUBLE PRECISION DEFAULT 0,
+        opened_at TIMESTAMPTZ DEFAULT NOW(),
+        closed_at TIMESTAMPTZ
+    );
+
+    -- جدول منفصل لحفظ المؤشرات إن أردت (اختياري)
+    CREATE TABLE IF NOT EXISTS indicators (
+        id BIGSERIAL PRIMARY KEY,
+        algorithm_id BIGINT REFERENCES algorithms(id),
+        symbol TEXT,
+        indicator_name TEXT,
+        indicator_value JSONB,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    """
+    conn = db_connect()
     try:
-        urls = ["https://api.ipify.org", "https://ifconfig.me/ip"]
-        for url in urls:
-            try:
-                resp = requests.get(url, timeout=5)
-                if resp.status_code == 200:
-                    ip = resp.text.strip()
-                    if ip and len(ip) > 7:
-                        return ip
-            except:
-                continue
-        return "UNKNOWN"
-    except Exception as e:
-        return f"ERROR: {e}"
+        cur = conn.cursor()
+        cur.execute(sql)
+        conn.commit()
+    finally:
+        conn.close()
+    logging.info("DATABASE READY")
 
-print("=" * 70)
-print("🚀 APEX KAF ADVISOR BOT v5.0 — STARTING")
-print("=" * 70)
-DEPLOYMENT_IP = get_public_ip()
-print(f"📌 PUBLIC IP: {DEPLOYMENT_IP}")
-print("=" * 70)
-print("⚠️  وضع الاستشارة فقط — لن يتم تنفيذ أي أوامر")
-print("=" * 70)
+# ============================================================
+# DATABASE HELPERS
+# ============================================================
 
-# =============================================================================
-# 🔧 CONFIG
-# =============================================================================
+def log_agent(agent, status, message, duration_ms=0):
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO agent_logs
+            (agent_id, agent_name, status, message, duration_ms)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (agent["id"], agent["name"], status, str(message)[:5000], duration_ms)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8122906116:AAHAWsXfaiymnvdeNO0BURyRVccJU8_gIco")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "6033203084"))
+def save_algorithm(agent, symbol, hypothesis, code):
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO algorithms
+            (lab, symbol, agent_id, agent_name, model_name, hypothesis, code)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+            """,
+            ("scalping", symbol, agent["id"], agent["name"], agent["model"], hypothesis, code)
+        )
+        algorithm_id = cur.fetchone()[0]
+        conn.commit()
+        return algorithm_id
+    finally:
+        conn.close()
 
-APEX_API_URL = os.getenv("APEX_API_URL", "https://binancetrading-production.up.railway.app")
-MONITOR_DB_PATH = os.getenv("MONITOR_DB_PATH", "kaf_advisor.db")
+def update_algorithm_score(algorithm_id, result):
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE algorithms
+            SET score=%s, win_rate=%s, profit_factor=%s, max_drawdown=%s, status=%s
+            WHERE id=%s
+            """,
+            (result["score"], result["win_rate"], result["profit_factor"],
+             result["max_drawdown"], "TESTED", algorithm_id)
+        )
+        cur.execute(
+            """
+            INSERT INTO backtests
+            (algorithm_id, symbol, total_trades, wins, losses,
+             win_rate, profit_factor, max_drawdown, score)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (algorithm_id, result["symbol"], result["total_trades"],
+             result["wins"], result["losses"], result["win_rate"],
+             result["profit_factor"], result["max_drawdown"], result["score"])
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-# AI Config
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "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")
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-AI_MODEL = "poolside/laguna-xs-2.1"
+def save_paper_trade(algorithm_id, trade):
+    """
+    trade: dict with keys: symbol, side, entry_price, take_profit, stop_loss,
+           exit_price, status, pnl_percent, opened_at, closed_at
+    """
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO paper_trades
+            (algorithm_id, symbol, side, entry_price, take_profit, stop_loss,
+             exit_price, status, pnl_percent, opened_at, closed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (algorithm_id, trade["symbol"], trade["side"], trade["entry_price"],
+             trade["take_profit"], trade["stop_loss"], trade["exit_price"],
+             trade["status"], trade["pnl_percent"],
+             trade["opened_at"], trade["closed_at"])
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-# Monitor
-MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "60"))
-AI_DECISION_INTERVAL = int(os.getenv("AI_DECISION_INTERVAL", "600"))  # 10 دقائق
+def save_trades_batch(algorithm_id, trades):
+    """حفظ مجموعة صفقات دفعة واحدة"""
+    if not trades:
+        return
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        for trade in trades:
+            cur.execute(
+                """
+                INSERT INTO paper_trades
+                (algorithm_id, symbol, side, entry_price, take_profit, stop_loss,
+                 exit_price, status, pnl_percent, opened_at, closed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (algorithm_id, trade["symbol"], trade["side"], trade["entry_price"],
+                 trade["take_profit"], trade["stop_loss"], trade["exit_price"],
+                 trade["status"], trade["pnl_percent"],
+                 trade["opened_at"], trade["closed_at"])
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
-# =============================================================================
-# 🔢 ثوابت حساب SP/TP من QUANTUM APEX v4.0 (بدون تغيير)
-# =============================================================================
-# هذه القيم مأخوذة مباشرة من البوت الأول — QUANTUM APEX v4.0
-# SL = entry ± (ATR × 2.5)
-# TP = entry ± (ATR × 5.0)
-ATR_PERIOD = 14
-STOP_LOSS_ATR_MULTIPLE = 2.5      # من CFG.risk.default_stop_atr_multiple
-TAKE_PROFIT_ATR_MULTIPLE = 5.0    # من CFG.risk.default_take_profit_atr_multiple
-ATR_SAFETY_FLOOR_PCT = 0.0001     # أقل قيمة ممكنة للـ ATR (0.01% من السعر)
+# ============================================================
+# BINANCE USDⓈ-M WEBSOCKET
+# ============================================================
 
-# =============================================================================
-# 🛡️ CIRCUIT BREAKER
-# =============================================================================
+def build_ws_url():
+    streams = []
+    for symbol in SYMBOLS:
+        streams.append(f"{symbol}@trade")
+        streams.append(f"{symbol}@depth20@100ms")
+        streams.append(f"{symbol}@kline_1m")
+    return BINANCE_WS + "/".join(streams)
 
-class CircuitBreaker:
-    def __init__(self, failure_threshold=5, timeout=60):
-        self.failure_threshold = failure_threshold
-        self.timeout = timeout
-        self.failures = 0
-        self.last_failure = None
-        self.state = "CLOSED"
-
-    def __call__(self, func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            if self.state == "OPEN":
-                if time.time() - self.last_failure > self.timeout:
-                    self.state = "HALF_OPEN"
-                else:
-                    return None
-            try:
-                result = func(*args, **kwargs)
-                if self.state == "HALF_OPEN":
-                    self.state = "CLOSED"
-                    self.failures = 0
-                return result
-            except Exception as e:
-                self.failures += 1
-                self.last_failure = time.time()
-                if self.failures >= self.failure_threshold:
-                    self.state = "OPEN"
-                raise
-        return wrapper
-
-circuit_breaker = CircuitBreaker()
-
-# =============================================================================
-# 🗄️ DATABASE
-# =============================================================================
-
-class MonitorDB:
-    def __init__(self, monitor_db_path):
-        self.monitor_conn = sqlite3.connect(monitor_db_path, check_same_thread=False)
-        self.lock = threading.Lock()
-        self._init_tables()
-
-    def _init_tables(self):
-        with self.lock:
-            self.monitor_conn.execute("""
-                CREATE TABLE IF NOT EXISTS kaf_analysis (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_id INTEGER, symbol TEXT, side TEXT,
-                    entry_price REAL, current_price REAL,
-                    sp_price REAL, tp_price REAL,
-                    profit_if_tp REAL, loss_if_sp REAL,
-                    profit_if_tp_pct REAL, loss_if_sp_pct REAL,
-                    position_size_usdt REAL, leverage INTEGER,
-                    profit_pct REAL, time_open_minutes INTEGER,
-                    target_progress REAL, trend_strength REAL, momentum_score REAL,
-                    funding_rate REAL, market_regime TEXT,
-                    atr_value REAL, atr_pct REAL,
-                    ai_decision TEXT, ai_confidence REAL, ai_explanation TEXT,
-                    probability_tp REAL, probability_sl REAL,
-                    probability_sideways REAL, probability_reversal REAL,
-                    risk_reward_ratio REAL, trend_alignment TEXT, reversal_risk REAL,
-                    management_score REAL, timestamp TEXT
-                );
-            """)
-            self.monitor_conn.commit()
-
-    @circuit_breaker
-    def get_open_trades(self) -> List[Dict[str, Any]]:
+async def websocket_worker():
+    url = build_ws_url()
+    while True:
         try:
-            resp = requests.get(f"{APEX_API_URL}/positions", timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list):
-                    return data
-            return []
+            logging.info("CONNECTING BINANCE WEBSOCKET")
+            async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2**23) as ws:
+                logging.info("BINANCE WEBSOCKET CONNECTED")
+                async for raw in ws:
+                    message = json.loads(raw)
+                    stream = message.get("stream", "")
+                    data = message.get("data", {})
+                    symbol = data.get("s", "").lower()
+                    if not symbol:
+                        continue
+
+                    if "@trade" in stream:
+                        price = float(data["p"])
+                        market_cache["prices"][symbol] = price
+                        market_cache["trades"][symbol].append({
+                            "price": price,
+                            "qty": float(data["q"]),
+                            "time": data["T"],
+                            "maker": data["m"],
+                        })
+                    elif "@depth" in stream:
+                        market_cache["depth"][symbol].append({
+                            "bids": data.get("b", []),
+                            "asks": data.get("a", []),
+                            "time": data.get("E"),
+                        })
+                    elif "@kline" in stream:
+                        k = data["k"]
+                        if k["x"]:
+                            market_cache["candles_1m"][symbol].append({
+                                "open_time": k["t"],
+                                "open": float(k["o"]),
+                                "high": float(k["h"]),
+                                "low": float(k["l"]),
+                                "close": float(k["c"]),
+                                "volume": float(k["v"]),
+                            })
+                            market_cache["prices"][symbol] = float(k["c"])
         except Exception as e:
-            logging.error(f"API Fetch Error: {e}")
-            return []
+            logging.error("WEBSOCKET ERROR: %s", e)
+            await asyncio.sleep(5)
 
-    def save_kaf_analysis(self, data: Dict[str, Any]):
-        columns = [
-            "trade_id", "symbol", "side", "entry_price", "current_price",
-            "sp_price", "tp_price", "profit_if_tp", "loss_if_sp",
-            "profit_if_tp_pct", "loss_if_sp_pct",
-            "position_size_usdt", "leverage",
-            "profit_pct", "time_open_minutes", "target_progress",
-            "trend_strength", "momentum_score", "funding_rate", "market_regime",
-            "atr_value", "atr_pct",
-            "ai_decision", "ai_confidence", "ai_explanation",
-            "recommendation", "probability_tp", "probability_sl",
-            "probability_sideways", "probability_reversal",
-            "risk_reward_ratio", "trend_alignment", "reversal_risk",
-            "management_score", "timestamp"
-        ]
-        values = [
-            data.get("trade_id"), data.get("symbol"), data.get("side"),
-            data.get("entry_price"), data.get("current_price"),
-            data.get("sp_price"), data.get("tp_price"),
-            data.get("profit_if_tp"), data.get("loss_if_sp"),
-            data.get("profit_if_tp_pct"), data.get("loss_if_sp_pct"),
-            data.get("position_size_usdt"), data.get("leverage"),
-            data.get("profit_pct"), data.get("time_open_minutes"),
-            data.get("target_progress"), data.get("trend_strength"),
-            data.get("momentum_score"), data.get("funding_rate"),
-            data.get("market_regime"), data.get("atr_value"), data.get("atr_pct"),
-            data.get("ai_decision"), data.get("ai_confidence"),
-            data.get("ai_explanation"), data.get("recommendation"),
-            data.get("probability_tp", 0), data.get("probability_sl", 0),
-            data.get("probability_sideways", 0), data.get("probability_reversal", 0),
-            data.get("risk_reward_ratio", 0), data.get("trend_alignment"),
-            data.get("reversal_risk", 0), data.get("management_score", 0),
-            data.get("timestamp")
-        ]
-        if len(columns) != len(values):
-            logging.error(f"DB mapping mismatch: {len(columns)} columns vs {len(values)} values")
-            return
-        placeholders = ",".join(["?"] * len(values))
-        with self.lock:
-            try:
-                self.monitor_conn.execute(
-                    f"INSERT INTO kaf_analysis ({','.join(columns)}) VALUES ({placeholders})",
-                    values
-                )
-                self.monitor_conn.commit()
-            except Exception as e:
-                logging.error(f"DB Save Error: {e}\n{traceback.format_exc()}")
+# ============================================================
+# FEATURE ENGINE
+# ============================================================
 
-    def get_latest_analysis(self, trade_id: int) -> Optional[Dict]:
-        with self.lock:
-            try:
-                row = self.monitor_conn.execute(
-                    "SELECT * FROM kaf_analysis WHERE trade_id=? ORDER BY id DESC LIMIT 1",
-                    (trade_id,)
-                ).fetchone()
-                if row:
-                    cols = [desc[0] for desc in self.monitor_conn.execute("SELECT * FROM kaf_analysis LIMIT 0").description]
-                    return dict(zip(cols, row))
-            except Exception as e:
-                logging.error(f"DB read error: {e}")
+def calculate_features(symbol):
+    trades = list(market_cache["trades"][symbol])
+    candles = list(market_cache["candles_1m"][symbol])
+    depth = list(market_cache["depth"][symbol])
+    if len(candles) < 50:
         return None
 
-# =============================================================================
-# 📊 ADVANCED ANALYTICS ENGINE
-# =============================================================================
+    df = pd.DataFrame(candles)
+    closes = df["close"].values
+    returns = np.diff(np.log(closes))
+    price_velocity = float(np.mean(returns[-10:])) if len(returns) >= 10 else 0
+    price_acceleration = float(np.mean(returns[-5:]) - np.mean(returns[-10:-5])) if len(returns) >= 10 else 0
+    volatility = float(np.std(returns[-30:])) if len(returns) >= 30 else 0
+    volumes = df["volume"].values
+    volume_ratio = float(np.mean(volumes[-5:]) / (np.mean(volumes[-30:]) + 1e-12))
 
-class AdvancedAnalyticsEngine:
-    def __init__(self, exchange_public):
-        self.exchange = exchange_public
-
-    def fetch_market_data(self, symbol: str) -> Dict:
-        try:
-            ticker = self.exchange.fetch_ticker(symbol)
-            ohlcv = self.exchange.fetch_ohlcv(symbol, '1h', limit=100)
-            return {
-                'price': ticker['last'],
-                'ohlcv': ohlcv,
-            }
-        except Exception as e:
-            return {'error': str(e)}
-
-    def compute_atr(self, ohlcv: List, period: int = 14) -> float:
-        """
-        حساب ATR الحقيقي بنفس طريقة QUANTUM APEX v4.0:
-        يستخدم High-Low-Close (True Range) مع فترة 14
-        """
-        if not ohlcv or len(ohlcv) < period + 1:
-            return 0.0
-        highs = np.array([c[2] for c in ohlcv[-(period+1):]])
-        lows = np.array([c[3] for c in ohlcv[-(period+1):]])
-        closes = np.array([c[4] for c in ohlcv[-(period+1):]])
-
-        # True Range = max(H-L, |H-Cprev|, |L-Cprev|)
-        trs = []
-        for i in range(1, len(closes)):
-            tr = max(
-                highs[i] - lows[i],
-                abs(highs[i] - closes[i-1]),
-                abs(lows[i] - closes[i-1])
-            )
-            trs.append(tr)
-
-        # ATR = متوسط True Range على آخر `period` فترة
-        atr = float(np.mean(trs[-period:])) if trs else 0.0
-        return atr
-
-    def adx_di(self, ohlcv: List, period: int = 14) -> Dict:
-        if not ohlcv or len(ohlcv) < period + 5:
-            return {'adx': 0.0, 'plus_di': 0.0, 'minus_di': 0.0}
-        highs = [c[2] for c in ohlcv]
-        lows = [c[3] for c in ohlcv]
-        closes = [c[4] for c in ohlcv]
-
-        plus_dms, minus_dms, trs = [], [], []
-        for i in range(1, len(closes)):
-            up_move = highs[i] - highs[i - 1]
-            down_move = lows[i - 1] - lows[i]
-            plus_dms.append(up_move if up_move > down_move and up_move > 0 else 0)
-            minus_dms.append(down_move if down_move > up_move and down_move > 0 else 0)
-            trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
-
-        atr = np.mean(trs[-period:]) or 1e-12
-        plus_di = 100 * np.mean(plus_dms[-period:]) / atr
-        minus_di = 100 * np.mean(minus_dms[-period:]) / atr
-
-        dx_values = []
-        for i in range(period, len(plus_dms)):
-            p_di = 100 * np.mean(plus_dms[i-period:i]) / atr
-            m_di = 100 * np.mean(minus_dms[i-period:i]) / atr
-            di_sum = p_di + m_di
-            if di_sum > 0:
-                dx_values.append(100 * abs(p_di - m_di) / di_sum)
-
-        if len(dx_values) >= period:
-            adx = np.mean(dx_values[-period:])
+    buy_volume = 0.0
+    sell_volume = 0.0
+    recent_trades = trades[-500:]
+    for t in recent_trades:
+        if t["maker"]:
+            sell_volume += t["qty"]
         else:
-            adx = np.mean(dx_values) if dx_values else 0.0
+            buy_volume += t["qty"]
+    trade_imbalance = (buy_volume - sell_volume) / (buy_volume + sell_volume + 1e-12)
 
-        return {'adx': adx, 'plus_di': plus_di, 'minus_di': minus_di}
+    book_imbalance = 0.0
+    spread = 0.0
+    if depth:
+        last_book = depth[-1]
+        bids = last_book["bids"]
+        asks = last_book["asks"]
+        bid_volume = sum(float(x[1]) for x in bids)
+        ask_volume = sum(float(x[1]) for x in asks)
+        book_imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume + 1e-12)
+        if bids and asks:
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+            mid = (best_bid + best_ask) / 2
+            spread = (best_ask - best_bid) / (mid + 1e-12)
 
-    def real_rsi(self, ohlcv: List) -> float:
-        if not ohlcv or len(ohlcv) < 15:
-            return 50.0
-        closes = [c[4] for c in ohlcv]
-        deltas = np.diff(closes)
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
-        avg_gain = np.mean(gains[-14:])
-        avg_loss = np.mean(losses[-14:])
-        if avg_loss == 0:
-            return 100.0
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
+    return {
+        "symbol": symbol.upper(),
+        "current_price": market_cache["prices"][symbol],
+        "candles": len(candles),
+        "trades": len(trades),
+        "price_velocity": price_velocity,
+        "price_acceleration": price_acceleration,
+        "volatility": volatility,
+        "volume_ratio": volume_ratio,
+        "buy_sell_imbalance": trade_imbalance,
+        "orderbook_imbalance": book_imbalance,
+        "spread": spread,
+        "last_50_closes": closes[-50:].tolist(),
+    }
 
-    def get_atr_pct(self, ohlcv: List) -> float:
-        if not ohlcv or len(ohlcv) < 15:
-            return 0.0
-        highs = [c[2] for c in ohlcv]
-        lows = [c[3] for c in ohlcv]
-        closes = [c[4] for c in ohlcv]
-        trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
-        atr = np.mean(trs[-14:])
-        return (atr / closes[-1]) * 100
+# ============================================================
+# AI PROMPT
+# ============================================================
 
-    def funding_rate(self, symbol: str) -> float:
-        try:
-            s = symbol.split('/')[0]
-            url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={s}USDT"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                return float(resp.json().get('lastFundingRate', 0))
-        except:
-            pass
-        return 0.0
+def build_prompt(features):
+    return f"""
+You are an independent quantitative research scientist.
 
-    def detect_market_regime(self, ohlcv: List) -> str:
-        if not ohlcv or len(ohlcv) < 50:
-            return "UNKNOWN"
-        di = self.adx_di(ohlcv)
-        adx = di['adx']
-        plus_di = di['plus_di']
-        minus_di = di['minus_di']
-        if adx < 15:
-            return "RANGING"
-        elif adx >= 25:
-            if plus_di > minus_di:
-                return "TRENDING_UP"
-            else:
-                return "TRENDING_DOWN"
-        else:
-            return "TRANSITION"
+You are competing against other AI researchers.
 
-    def analyze_market(self, symbol: str) -> Dict:
-        market = self.fetch_market_data(symbol)
-        if 'error' in market:
-            return {'error': market['error']}
-        ohlcv = market.get('ohlcv', [])
+Your goal is NOT to create a basic trading indicator.
+
+Do not simply combine RSI, MACD, EMA, or fixed thresholds.
+
+Study the supplied market features as a mathematical system.
+
+Search for hidden relationships involving:
+
+- temporal dependencies
+- nonlinear transformations
+- derivatives
+- acceleration and deceleration
+- changing distributions
+- order flow
+- trade imbalance
+- liquidity asymmetry
+- volatility regimes
+- interaction terms
+- normalization
+- entropy-like behavior
+- structural transitions
+
+You must independently create a novel mathematical
+scalping indicator.
+
+You are NOT allowed to copy a conventional
+BUY/SELL rule.
+
+The final Python code MUST define exactly:
+
+def generate_signal(df):
+
+Input dataframe columns:
+
+open
+high
+low
+close
+volume
+
+The function must return a pandas Series containing only:
+
+1 = LONG
+-1 = SHORT
+0 = HOLD
+
+Do not use external APIs.
+
+Do not use files.
+
+Do not use network.
+
+Do not use subprocess.
+
+Do not use eval or exec.
+
+Do not import anything.
+
+You may use:
+
+numpy as np
+pandas as pd
+math
+
+Return your answer EXACTLY in this format:
+
+HYPOTHESIS:
+<short explanation>
+
+CODE:
+```python
+def generate_signal(df):
+    ...
+
+MARKET DATA SNAPSHOT:
+
+{json.dumps(features, indent=2)[:12000]} """
+
+# ============================================================
+# NVIDIA AI CALL
+# ============================================================
+
+def call_agent_sync(agent, features):
+    prompt = build_prompt(features)
+    headers = {
+        "Authorization": f"Bearer {agent['api_key']}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "model": agent["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": agent["temperature"],
+        "max_tokens": agent.get("max_tokens", 8000),
+        "stream": False,
+    }
+    if agent.get("reasoning_effort"):
+        payload["reasoning_effort"] = agent["reasoning_effort"]
+
+    response = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=110)
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
+
+async def run_agent(agent, features):
+    start = time.time()
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(call_agent_sync, agent, features),
+            timeout=AGENT_TIMEOUT
+        )
+        duration = int((time.time() - start) * 1000)
+        log_agent(agent, "SUCCESS", "Algorithm generated", duration)
+        state["agents_ok"] += 1
+        return {"agent": agent, "status": "SUCCESS", "content": result}
+    except asyncio.TimeoutError:
+        duration = int((time.time() - start) * 1000)
+        log_agent(agent, "TIMEOUT", "Agent skipped", duration)
+        state["agents_failed"] += 1
+        return {"agent": agent, "status": "TIMEOUT", "content": None}
+    except Exception as e:
+        duration = int((time.time() - start) * 1000)
+        log_agent(agent, "FAILED", str(e), duration)
+        state["agents_failed"] += 1
+        logging.error("%s FAILED: %s", agent["name"], e)
+        return {"agent": agent, "status": "FAILED", "content": None}
+
+# ============================================================
+# PARSE AI OUTPUT
+# ============================================================
+
+def parse_ai_output(text):
+    if not text:
+        return None, None
+    hypothesis = ""
+    if "HYPOTHESIS:" in text:
+        part = text.split("HYPOTHESIS:", 1)[1]
+        if "CODE:" in part:
+            hypothesis = part.split("CODE:", 1)[0].strip()
+    code = None
+    if "```python" in text:
+        code = text.split("```python", 1)[1]
+        if "```" in code:
+            code = code.split("```", 1)[0]
+        code = code.strip()
+    elif "def generate_signal" in text:
+        index = text.find("def generate_signal")
+        code = text[index:].strip()
+    return hypothesis, code
+
+# ============================================================
+# SAFE VALIDATION
+# ============================================================
+
+def validate_code(code):
+    if not code:
+        return False, "No code"
+    forbidden = [
+        "import ", "__import__", "open(", "exec(", "eval(",
+        "subprocess", "requests", "socket", "os.", "sys.",
+        "pathlib", "shutil"
+    ]
+    lowered = code.lower()
+    for word in forbidden:
+        if word in lowered:
+            return False, f"Forbidden: {word}"
+    if "def generate_signal" not in code:
+        return False, "generate_signal missing"
+    try:
+        compile(code, "<ai_algorithm>", "exec")
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
+# ============================================================
+# RUN GENERATED INDICATOR
+# ============================================================
+
+def run_algorithm(code, df):
+    safe_globals = {
+        "np": np,
+        "pd": pd,
+        "math": math,
+        "__builtins__": {
+            "abs": abs, "min": min, "max": max,
+            "len": len, "range": range,
+            "float": float, "int": int,
+        },
+    }
+    local_vars = {}
+    exec(code, safe_globals, local_vars)
+    fn = local_vars.get("generate_signal")
+    if not fn:
+        raise ValueError("generate_signal missing")
+    signals = fn(df.copy())
+    signals = pd.Series(signals, index=df.index)
+    return signals.clip(-1, 1).fillna(0)
+
+# ============================================================
+# BACKTEST with TP/SL and trade recording
+# ============================================================
+
+def backtest(symbol, code, algorithm_id=None):
+    """
+    تشغيل backtest على بيانات الشموع المخزنة.
+    تعيد قاموس النتائج، وتحفظ الصفقات في قاعدة البيانات إذا تم تمرير algorithm_id.
+    """
+    candles = list(market_cache["candles_1m"][symbol])
+    if len(candles) < 200:
         return {
-            'symbol': symbol,
-            'price': market.get('price', 0),
-            'market_structure': self.detect_market_regime(ohlcv),
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'ohlcv': ohlcv
+            "symbol": symbol.upper(),
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0,
+            "profit_factor": 0,
+            "max_drawdown": 0,
+            "score": 0,
+            "trades": [],
         }
 
-# =============================================================================
-# 🤖 AI CLIENT — مستشار فقط (لا يصدر أوامر تنفيذ)
-# =============================================================================
+    df = pd.DataFrame(candles)
+    try:
+        signals = run_algorithm(code, df)
+    except Exception as e:
+        logging.error("ALGORITHM EXECUTION FAILED: %s", e)
+        return {
+            "symbol": symbol.upper(),
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0,
+            "profit_factor": 0,
+            "max_drawdown": 100,
+            "score": -100,
+            "trades": [],
+        }
 
-class AIClient:
-    def __init__(self):
-        self.client = OpenAI(
-            base_url=NVIDIA_BASE_URL,
-            api_key=NVIDIA_API_KEY
-        )
+    position = None
+    equity = 1000.0
+    peak = equity
+    max_drawdown = 0.0
+    wins = 0
+    losses = 0
+    profits = []
+    loss_sum = 0.0
+    TP = 0.004   # 0.4% Take Profit
+    SL = 0.0025  # 0.25% Stop Loss
 
-    def get_advice(self, trade_data: Dict) -> Dict:
-        """
-        استشارة AI — القرارات هي HOLD / ALERT فقط
-        لا يوجد CLOSE أو REDUCE أو TRAIL_SL لأن البوت لا ينفذ شيئاً
-        """
-        prompt = f"""أنت "مستشار صفقات" (Trade Advisor) في صندوق استثماري محترف. دورك هو الملاحظة والتوصية فقط — لا يمكنك تنفيذ أي إجراء.
+    trades_record = []   # لتخزين الصفقات قبل الحفظ
 
-📊 [بيانات الصفقة]
-العملة: {trade_data.get('symbol')} | نوع الصفقة: {trade_data.get('side')}
-سعر الدخول: {trade_data.get('entry_price')} | السعر الحالي: {trade_data.get('current_price')}
-الربح/الخسارة الحالي: {trade_data.get('profit_pct', 0):.2f}% | مدة الصفقة: {trade_data.get('time_open_minutes')} دقيقة
+    for i in range(50, len(df) - 1):
+        price = float(df["close"].iloc[i])
+        high = float(df["high"].iloc[i])
+        low = float(df["low"].iloc[i])
+        signal = int(signals.iloc[i])
 
-📏 [وقف الخسارة والهدف — من خوارزمية QUANTUM APEX]
-وقف الخسارة (SP): {trade_data.get('sp_price')} | مسافة SP: {trade_data.get('distance_to_sp_pct', 0):.2f}%
-هدف الربح (TP): {trade_data.get('tp_price')} | مسافة TP: {trade_data.get('distance_to_tp_pct', 0):.2f}%
-نسبة المخاطرة للعائد (R:R): {trade_data.get('risk_reward', 0):.2f}
+        if position is None:
+            if signal == 1:
+                position = {
+                    "side": "LONG",
+                    "entry": price,
+                    "tp": price * (1 + TP),
+                    "sl": price * (1 - SL),
+                    "opened_at": df["open_time"].iloc[i],
+                }
+            elif signal == -1:
+                position = {
+                    "side": "SHORT",
+                    "entry": price,
+                    "tp": price * (1 - TP),
+                    "sl": price * (1 + SL),
+                    "opened_at": df["open_time"].iloc[i],
+                }
+        else:
+            exit_price = None
+            if position["side"] == "LONG":
+                if low <= position["sl"]:
+                    exit_price = position["sl"]
+                elif high >= position["tp"]:
+                    exit_price = position["tp"]
+            else:  # SHORT
+                if high >= position["sl"]:
+                    exit_price = position["sl"]
+                elif low <= position["tp"]:
+                    exit_price = position["tp"]
 
-💰 [حساب الربح والخسارة المتوقع]
-الربح إذا تحقق الهدف (TP): +{trade_data.get('profit_if_tp', 0):.2f} USDT ({trade_data.get('profit_if_tp_pct', 0):.2f}%)
-الخسارة إذا ضرب الوقف (SP): -{trade_data.get('loss_if_sp', 0):.2f} USDT ({trade_data.get('loss_if_sp_pct', 0):.2f}%)
+            if exit_price:
+                entry = position["entry"]
+                if position["side"] == "LONG":
+                    pnl_pct = (exit_price - entry) / entry
+                else:
+                    pnl_pct = (entry - exit_price) / entry
 
-📈 [مؤشرات السوق الحية - 1H]
-حالة السوق: {trade_data.get('market_regime')}
-قوة الاتجاه (ADX): {trade_data.get('trend_strength_adx', 0):.1f}/100
-مؤشر القوة النسبية RSI(14): {trade_data.get('rsi_14', 0):.1f}
-التقلبات (ATR%): {trade_data.get('atr_pct', 0):.2f}%
-معدل التمويل: {trade_data.get('funding_rate', 0):.6f}
+                equity *= (1 + pnl_pct)
+                profits.append(pnl_pct)
 
-يجب أن يكون التفسير (reason) باللغة العربية الفصحى حصراً وبدون أي كلمات إنجليزية.
+                if pnl_pct > 0:
+                    wins += 1
+                else:
+                    losses += 1
+                    loss_sum += abs(pnl_pct)
 
-أجب بصيغة JSON فقط:
-{{
-    "action": "HOLD أو ALERT",
-    "tp_probability": 60,
-    "sl_probability": 10,
-    "sideways_probability": 20,
-    "reversal_probability": 10,
-    "confidence": 85,
-    "reason": "نصيحتك ك مستشار صفقات — اشرح وضع الصفقة بالعربية الفصحى"
-}}
+                peak = max(peak, equity)
+                dd = (peak - equity) / peak
+                max_drawdown = max(max_drawdown, dd)
+
+                # تسجيل الصفقة
+                trade_record = {
+                    "symbol": symbol.upper(),
+                    "side": position["side"],
+                    "entry_price": entry,
+                    "take_profit": position["tp"],
+                    "stop_loss": position["sl"],
+                    "exit_price": exit_price,
+                    "status": "CLOSED",
+                    "pnl_percent": round(pnl_pct * 100, 4),
+                    "opened_at": position["opened_at"],
+                    "closed_at": df["open_time"].iloc[i],
+                }
+                trades_record.append(trade_record)
+
+                position = None
+
+    total = wins + losses
+    win_rate = wins / total * 100 if total else 0
+    profit_sum = sum(x for x in profits if x > 0)
+    profit_factor = profit_sum / loss_sum if loss_sum > 0 else profit_sum
+
+    score = win_rate * 0.40 + min(profit_factor, 5) * 10 - max_drawdown * 100 * 0.30
+
+    result = {
+        "symbol": symbol.upper(),
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(win_rate, 4),
+        "profit_factor": round(profit_factor, 4),
+        "max_drawdown": round(max_drawdown * 100, 4),
+        "score": round(score, 4),
+        "trades": trades_record,
+    }
+
+    # حفظ الصفقات في قاعدة البيانات إذا كان لدينا algorithm_id
+    if algorithm_id and trades_record:
+        save_trades_batch(algorithm_id, trades_record)
+
+    return result
+
+# ============================================================
+# MAIN AI RESEARCH CYCLE
+# ============================================================
+
+async def research_cycle():
+    state["cycle"] += 1
+    logging.info("STARTING AI RESEARCH CYCLE %s", state["cycle"])
+
+    for symbol in SYMBOLS:
+        features = calculate_features(symbol)
+        if not features:
+            continue
+
+        tasks = [
+            run_agent(agent, features)
+            for agent in AGENTS
+            if not agent["api_key"].startswith("PUT_")
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            if result["status"] != "SUCCESS":
+                continue
+
+            agent = result["agent"]
+            hypothesis, code = parse_ai_output(result["content"])
+            valid, reason = validate_code(code)
+            if not valid:
+                log_agent(agent, "INVALID_CODE", reason)
+                continue
+
+            algorithm_id = save_algorithm(agent, symbol.upper(), hypothesis, code)
+
+            # Backtest مع حفظ الصفقات
+            result_bt = backtest(symbol, code, algorithm_id=algorithm_id)
+
+            update_algorithm_score(algorithm_id, result_bt)
+
+            logging.info(
+                "AI=%s | SYMBOL=%s | SCORE=%s | TRADES=%s",
+                agent["name"], symbol.upper(),
+                result_bt["score"], result_bt["total_trades"]
+            )
+
+    state["last_cycle"] = datetime.now(timezone.utc)
+
+# ============================================================
+# RESEARCH LOOP
+# ============================================================
+
+async def research_loop():
+    while True:
+        try:
+            await research_cycle()
+        except Exception:
+            logging.error(traceback.format_exc())
+        await asyncio.sleep(30 * 60)  # كل 30 دقيقة
+
+# ============================================================
+# LOCAL PAPER TRADE MONITOR (استعلامات)
+# ============================================================
+
+def get_best_algorithm():
+    conn = db_connect()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT * FROM algorithms
+            WHERE status='TESTED'
+            ORDER BY score DESC
+            LIMIT 1
+        """)
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+def get_recent_trades(limit=10):
+    conn = db_connect()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT * FROM paper_trades
+            ORDER BY opened_at DESC
+            LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+def get_algorithms_list(limit=5):
+    conn = db_connect()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT id, agent_name, symbol, score, created_at
+            FROM algorithms
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+# ============================================================
+# TELEGRAM API (بدون مكتبة إضافية)
+# ============================================================
+
+TELEGRAM_OFFSET = 0
+
+def telegram_request(method, payload=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
+    response = requests.post(url, json=payload or {}, timeout=30)
+    return response.json()
+
+def telegram_send(chat_id, text):
+    return telegram_request("sendMessage", {"chat_id": chat_id, "text": text[:4000]})
+
+async def telegram_loop():
+    global TELEGRAM_OFFSET
+    while True:
+        try:
+            data = await asyncio.to_thread(
+                telegram_request,
+                "getUpdates",
+                {"offset": TELEGRAM_OFFSET, "timeout": 30}
+            )
+            for update in data.get("result", []):
+                TELEGRAM_OFFSET = update["update_id"] + 1
+                message = update.get("message", {})
+                text = message.get("text", "")
+                chat = message.get("chat", {})
+                chat_id = chat.get("id")
+                if not chat_id:
+                    continue
+
+                # /status
+                if text == "/status":
+                    uptime = datetime.now(timezone.utc) - state["started_at"]
+                    reply = f"""
+🤖 {APP_NAME}
+
+🟢 System: ONLINE
+
+🔄 Research cycles: {state["cycle"]}
+
+🤖 Agents success: {state["agents_ok"]}
+
+❌ Agents failed: {state["agents_failed"]}
+
+⏱ Uptime: {uptime}
+
+📊 Symbols: {", ".join(x.upper() for x in SYMBOLS)}
 """
-        try:
-            logging.info(f"🤖 Calling {AI_MODEL} for {trade_data.get('symbol')}")
-            start_time = time.time()
-            response = self.client.chat.completions.create(
-                model=AI_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a quantitative trade advisor. You observe and recommend only. Return valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=1.0,
-                top_p=0.95,
-                max_tokens=8192,
-                stream=False,
-                extra_body={"chat_template_kwargs": {"enable_thinking": True}}
-            )
-            elapsed = time.time() - start_time
-            logging.info(f"✅ {AI_MODEL} responded in {elapsed:.2f}s")
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
 
-            raw = response.choices[0].message.content.strip()
-            if raw.startswith("```"):
-                raw = "\n".join([l for l in raw.split("\n") if not l.strip().startswith("```")])
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
-            result = json.loads(raw)
-            return {
-                'recommendation': result.get('action', result.get('recommendation', 'HOLD')).upper(),
-                'confidence': float(result.get('confidence', 50)),
-                'reason': result.get('reason', ''),
-                'tp_probability': float(result.get('tp_probability', 50)),
-                'sl_probability': float(result.get('sl_probability', 25)),
-                'sideways_probability': float(result.get('sideways_probability', 15)),
-                'reversal_probability': float(result.get('reversal_probability', 10)),
-            }
+                # /best أو /scalping
+                elif text in ["/best", "/scalping"]:
+                    best = await asyncio.to_thread(get_best_algorithm)
+                    if not best:
+                        reply = "⏳ لا توجد خوارزمية مختبرة حتى الآن."
+                    else:
+                        reply = f"""
+🏆 BEST ALGORITHM
+
+ID: {best["id"]}
+🤖 AI: {best["agent_name"]}
+🧠 Model: {best["model_name"]}
+📊 Symbol: {best["symbol"]}
+⭐ Score: {best["score"]}
+🎯 Win Rate: {best["win_rate"]:.2f}%
+📈 Profit Factor: {best["profit_factor"]:.3f}
+📉 Max Drawdown: {best["max_drawdown"]:.2f}%
+
+📝 Hypothesis:
+{best["hypothesis"][:1200]}
+"""
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
+
+                # /code ID
+                elif text.startswith("/code"):
+                    parts = text.split()
+                    if len(parts) < 2:
+                        reply = "استعمل:\n/code ID"
+                    else:
+                        algorithm_id = parts[1]
+                        conn = db_connect()
+                        try:
+                            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                            cur.execute("SELECT * FROM algorithms WHERE id=%s", (algorithm_id,))
+                            algo = cur.fetchone()
+                        finally:
+                            conn.close()
+                        if not algo:
+                            reply = "❌ Algorithm not found"
+                        else:
+                            reply = f"💻 ALGORITHM #{algo['id']}\n\n{algo['code']}"
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
+
+                # /trades
+                elif text == "/trades":
+                    trades = await asyncio.to_thread(get_recent_trades, 10)
+                    if not trades:
+                        reply = "لا توجد صفقات محاكاة مسجلة."
+                    else:
+                        lines = ["📊 LAST TRADES"]
+                        for trade in trades:
+                            lines.append(
+                                f"""
+ID: {trade["id"]} {trade["symbol"]} {trade["side"]}
+Entry: {trade["entry_price"]}  TP: {trade["take_profit"]}  SL: {trade["stop_loss"]}
+Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent"]}%
+"""
+                            )
+                        reply = "\n".join(lines)
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
+
+                # /list لعرض آخر 5 خوارزميات
+                elif text == "/list":
+                    algos = await asyncio.to_thread(get_algorithms_list, 5)
+                    if not algos:
+                        reply = "لا توجد خوارزميات مسجلة."
+                    else:
+                        lines = ["📋 آخر الخوارزميات:"]
+                        for a in algos:
+                            lines.append(
+                                f"ID:{a['id']}  {a['agent_name']}  {a['symbol']}  Score:{a['score']}  {a['created_at']}"
+                            )
+                        reply = "\n".join(lines)
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
+
+                # /help
+                elif text in ["/start", "/help"]:
+                    reply = """
+🤖 AI ALGORITHM LAB
+
+الأوامر:
+/status       حالة النظام
+/best         أفضل خوارزمية
+/scalping     نفس /best
+/code ID      عرض كود خوارزمية
+/trades       آخر الصفقات المسجلة
+/list         عرض آخر 5 خوارزميات
+/help         هذه الرسالة
+"""
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
+
         except Exception as e:
-            logging.error(f"❌ {AI_MODEL} ERROR for {trade_data.get('symbol')}: {type(e).__name__}: {e}")
-            return {
-                'recommendation': 'HOLD',
-                'confidence': 0,
-                'reason': f'AI غير متاح: {type(e).__name__}',
-                'tp_probability': 50,
-                'sl_probability': 25,
-                'sideways_probability': 15,
-                'reversal_probability': 10,
-            }
-
-# =============================================================================
-# 📡 TELEGRAM BOT — استشاري فقط
-# =============================================================================
-
-class TelegramBot:
-    def __init__(self, token, admin_chat_id, monitor_db, analytics_engine):
-        self.token = token
-        self.admin_chat_id = admin_chat_id
-        self.db = monitor_db
-        self.analytics = analytics_engine
-
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "👋 مرحباً! أنا بوت المستشار الذكي APEX KAF v5.0\n"
-            "🔍 دوري: مراقبة الصفقات وتقديم SP و TP ونصائح فقط\n"
-            "⚠️ لا أنفذ أي صفقات\n\n"
-            "الأوامر:\n"
-            "/positions - الصفقات المفتوحة مع SP/TP والربح/الخسارة المتوقع\n"
-            "/advice <id> - تحليل AI مفصل لصفقة محددة\n"
-            "/market <symbol> - تحليل سريع للسوق\n"
-            "/status - حالة البوت"
-        )
-
-    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        status_text = f"""
-📊 <b>حالة بوت المستشار APEX KAF v5.0</b>
-
-🔧 <b>الإعدادات</b>
-• الوضع: 🟢 استشاري فقط (KAF) — لا ينفذ أي أوامر
-• MONITOR_INTERVAL: {MONITOR_INTERVAL}s
-• AI_DECISION_INTERVAL: {AI_DECISION_INTERVAL}s
-• ATR Period: {ATR_PERIOD}
-• SP Multiplier: {STOP_LOSS_ATR_MULTIPLE}x ATR
-• TP Multiplier: {TAKE_PROFIT_ATR_MULTIPLE}x ATR
-
-📈 <b>الصفقات المفتوحة:</b> {len(self.db.get_open_trades())}
-
-⚠️ هذا البوت <b>لا ينفذ</b> أي صفقات — يقدم المشورة فقط
-        """
-        await update.message.reply_text(status_text, parse_mode='HTML')
-
-    async def positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        trades = self.db.get_open_trades()
-        if not trades:
-            await update.message.reply_text("لا توجد صفقات مفتوحة حالياً. 💤")
-            return
-
-        msg = "📊 <b>الصفقات المفتوحة — المستشار الذكي</b>\n"
-        msg += "⚠️ <i>هذا البوت لا ينفذ أي أوامر — مراقب فقط</i>\n\n"
-
-        for t in trades:
-            trade_id = t.get('id', '?')
-            symbol = str(t.get('symbol', 'UNKNOWN')).replace(':USDT', '')
-            side = str(t.get('side', 'UNKNOWN'))
-            entry_price = round(float(t.get('entry_price') or 0), 6)
-            leverage = t.get('leverage_used', 1)
-            score = t.get('confidence', 0)
-
-            # جلب آخر تحليل من قاعدة البيانات
-            analysis = self.db.get_latest_analysis(trade_id)
-
-            if analysis:
-                sp_price = round(float(analysis.get('sp_price') or 0), 6)
-                tp_price = round(float(analysis.get('tp_price') or 0), 6)
-                current_price = round(float(analysis.get('current_price') or 0), 6)
-                profit_pct = float(analysis.get('profit_pct') or 0)
-                profit_if_tp = float(analysis.get('profit_if_tp') or 0)
-                loss_if_sp = float(analysis.get('loss_if_sp') or 0)
-                profit_if_tp_pct = float(analysis.get('profit_if_tp_pct') or 0)
-                loss_if_sp_pct = float(analysis.get('loss_if_sp_pct') or 0)
-                rr = float(analysis.get('risk_reward_ratio') or 0)
-                ai_rec = analysis.get('ai_decision', 'HOLD')
-                ai_conf = float(analysis.get('ai_confidence') or 0)
-                ai_reason = analysis.get('ai_explanation', '')
-                tp_prob = float(analysis.get('probability_tp') or 0)
-                sl_prob = float(analysis.get('probability_sl') or 0)
-            else:
-                # لا يوجد تحليل بعد — نحسب SP/TP على السريع
-                sp_price = 0
-                tp_price = 0
-                current_price = round(float(t.get('current_price') or t.get('mark_price') or 0), 6)
-                profit_pct = 0
-                profit_if_tp = 0
-                loss_if_sp = 0
-                profit_if_tp_pct = 0
-                loss_if_sp_pct = 0
-                rr = 0
-                ai_rec = "⏳"
-                ai_conf = 0
-                ai_reason = "التحليل قيد التجهيز..."
-                tp_prob = 0
-                sl_prob = 0
-
-            side_icon = "🟢" if side == "LONG" else ("🔴" if side == "SHORT" else "⚪")
-            pnl_icon = "📈" if profit_pct >= 0 else "📉"
-
-            msg += f"{side_icon} <b>#{trade_id} {symbol}</b> | {side} | {leverage}x\n"
-            msg += f"   📥 الدخول: ${entry_price}\n"
-            msg += f"   📍 الحالي: ${current_price} {pnl_icon} {profit_pct:+.2f}%\n"
-            msg += f"   🔒 SP: ${sp_price} | 🎯 TP: ${tp_price}\n"
-            msg += f"   📐 R:R = {rr:.2f}\n"
-            msg += f"   💰 إذا حققت الهدف (TP): <b>+{profit_if_tp:.2f} USDT</b> ({profit_if_tp_pct:+.2f}%)\n"
-            msg += f"   🛑 إذا ضرب الوقف (SP): <b>-{loss_if_sp:.2f} USDT</b> ({loss_if_sp_pct:+.2f}%)\n"
-            msg += f"   🤖 AI: {ai_rec} | ثقة: {ai_conf:.0f}%\n"
-            msg += f"   📊 احتمال TP: {tp_prob:.0f}% | احتمال SP: {sl_prob:.0f}%\n"
-            if ai_reason:
-                # تقصير النص إذا كان طويلاً
-                if len(ai_reason) > 150:
-                    ai_reason = ai_reason[:150] + "..."
-                msg += f"   💡 <i>{ai_reason}</i>\n"
-            msg += "─────────────────────\n"
-
-        await update.message.reply_text(msg, parse_mode='HTML')
-
-    async def advice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not context.args:
-            await update.message.reply_text("يرجى إرسال معرف الصفقة: /advice <id>")
-            return
-        try:
-            trade_id = int(context.args[0])
-        except:
-            await update.message.reply_text("المعرف غير صحيح.")
-            return
-
-        analysis = self.db.get_latest_analysis(trade_id)
-        if not analysis:
-            await update.message.reply_text("⏳ التحليل قيد التجهيز أو لم يتم العثور عليه، يرجى الانتظار دقيقة والمحاولة مجدداً.")
-            return
-
-        symbol = str(analysis.get('symbol', 'UNKNOWN')).replace(':USDT', '')
-        side = analysis.get('side', 'UNKNOWN')
-        entry = analysis.get('entry_price', 0)
-        current = analysis.get('current_price', 0)
-        sp = analysis.get('sp_price', 0)
-        tp = analysis.get('tp_price', 0)
-        profit_pct = analysis.get('profit_pct', 0)
-
-        msg = f"🔍 <b>تقرير المستشار — صفقة #{trade_id}</b>\n\n"
-        msg += f" العملة: <b>{symbol}</b> | {side}\n"
-        msg += f" 📥 الدخول: ${entry:.6f}\n"
-        msg += f" 📍 الحالي: ${current:.6f} ({profit_pct:+.2f}%)\n\n"
-
-        msg += f"📏 <b>وقف الخسارة والهدف (من QUANTUM APEX)</b>\n"
-        msg += f" 🔒 SP: ${sp:.6f}\n"
-        msg += f" 🎯 TP: ${tp:.6f}\n"
-        msg += f" 📐 R:R = {analysis.get('risk_reward_ratio', 0):.2f}\n\n"
-
-        msg += f"💰 <b>حساب الربح والخسارة المتوقع</b>\n"
-        msg += f" ✅ إذا حققت الهدف: <b>+{analysis.get('profit_if_tp', 0):.2f} USDT</b> ({analysis.get('profit_if_tp_pct', 0):+.2f}%)\n"
-        msg += f" ❌ إذا ضرب الوقف: <b>-{analysis.get('loss_if_sp', 0):.2f} USDT</b> ({analysis.get('loss_if_sp_pct', 0):+.2f}%)\n\n"
-
-        msg += f"📈 <b>مؤشرات السوق</b>\n"
-        msg += f" حالة السوق: {analysis.get('market_regime', 'N/A')}\n"
-        msg += f" ADX: {analysis.get('trend_strength', 0):.1f} | RSI: {analysis.get('momentum_score', 0):.1f}\n"
-        msg += f" ATR: {analysis.get('atr_pct', 0):.2f}% | Funding: {analysis.get('funding_rate', 0):.6f}\n\n"
-
-        msg += f"🎯 <b>احتمالات AI</b>\n"
-        msg += f" الهدف (TP): {analysis.get('probability_tp', 0):.0f}%\n"
-        msg += f" الوقف (SP): {analysis.get('probability_sl', 0):.0f}%\n"
-        msg += f" عرضي: {analysis.get('probability_sideways', 0):.0f}%\n"
-        msg += f" انعكاس: {analysis.get('probability_reversal', 0):.0f}%\n\n"
-
-        rec = analysis.get('ai_decision', 'HOLD')
-        conf = analysis.get('ai_confidence', 0)
-        reason = analysis.get('ai_explanation', '')
-        msg += f"🤖 <b>نصيحة المستشار:</b> {rec}\n"
-        msg += f" مستوى الثقة: {conf:.0f}%\n"
-        msg += f" 💡 <i>{reason}</i>\n\n"
-        msg += "⚠️ <i>تذكر: هذا البوت لا ينفذ أي أوامر — أنت من يتخذ القرار</i>"
-
-        await update.message.reply_text(msg, parse_mode='HTML')
-
-    async def market(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not context.args:
-            await update.message.reply_text("يرجى إرسال اسم العملة: مثلاً /market BTC")
-            return
-        symbol = context.args[0].upper()
-        if not symbol.endswith('USDT'):
-            symbol += 'USDT'
-        symbol = f"{symbol}/USDT:USDT"
-
-        await update.message.reply_text(f"⏳ جاري الفحص المباشر لعملة {symbol}...")
-        try:
-            market_data = self.analytics.analyze_market(symbol)
-            if 'error' in market_data:
-                await update.message.reply_text(f"⚠️ خطأ في جلب بيانات {symbol}: {market_data['error']}")
-                return
-            ohlcv = market_data.get('ohlcv', [])
-            atr = self.analytics.compute_atr(ohlcv, ATR_PERIOD)
-            atr_pct = self.analytics.get_atr_pct(ohlcv)
-            price = market_data.get('price', 0)
-
-            # حساب SP و TP المرجعي (كما سيفعلها QUANTUM APEX)
-            sp_long = price - (atr * STOP_LOSS_ATR_MULTIPLE)
-            tp_long = price + (atr * TAKE_PROFIT_ATR_MULTIPLE)
-            sp_short = price + (atr * STOP_LOSS_ATR_MULTIPLE)
-            tp_short = price - (atr * TAKE_PROFIT_ATR_MULTIPLE)
-
-            msg = f"📊 <b>تحليل السوق — {symbol.replace('/USDT:USDT', '')}</b>\n\n"
-            msg += f"<b>السعر الحالي:</b> ${price}\n"
-            msg += f"<b>بنية السوق:</b> {market_data.get('market_structure', 'N/A')}\n"
-            msg += f"<b>ATR({ATR_PERIOD}):</b> {atr:.6f} ({atr_pct:.2f}%)\n\n"
-            msg += f"📏 <b>SP/TP المرجعي (كما ستحسبهما QUANTUM APEX):</b>\n"
-            msg += f"🟢 LONG: SP=${sp_long:.6f} | TP=${tp_long:.6f}\n"
-            msg += f"🔴 SHORT: SP=${sp_short:.6f} | TP=${tp_short:.6f}\n"
-            await update.message.reply_text(msg, parse_mode='HTML')
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ حدث خطأ غير متوقع: {e}")
-
-    def run(self):
-        self.app = Application.builder().token(self.token).build()
-        self.app.add_handler(CommandHandler("start", self.start))
-        self.app.add_handler(CommandHandler("status", self.status))
-        self.app.add_handler(CommandHandler("positions", self.positions))
-        self.app.add_handler(CommandHandler("advice", self.advice))
-        self.app.add_handler(CommandHandler("market", self.market))
-        self.app.run_polling()
-
-# =============================================================================
-# 🔁 ADVISOR LOOP — مراقبة وتحليل فقط (بدون تنفيذ)
-# =============================================================================
-
-class AdvisorLoop:
-    def __init__(self, db: MonitorDB, analytics: AdvancedAnalyticsEngine, ai: AIClient):
-        self.db = db
-        self.analytics = analytics
-        self.ai = ai
-        self.running = True
-        self.queue = Queue()
-        self.market_cache = {}
-        self.last_ai_time = {}
-        self.queued_trades = set()
-        self.queue_lock = threading.Lock()
-        self.ai_lock = threading.Semaphore(1)
-
-    def start(self):
-        for _ in range(3):
-            threading.Thread(target=self._worker, daemon=True).start()
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def stop(self):
-        self.running = False
-        for _ in range(3):
-            self.queue.put(None)
-
-    def _worker(self):
-        while True:
-            trade = self.queue.get()
-            if trade is None:
-                break
-            try:
-                self._analyze_trade(trade)
-            except Exception as e:
-                logging.error(f"Worker Error for {trade.get('symbol', 'UNKNOWN')}:\n{traceback.format_exc()}")
-            finally:
-                with self.queue_lock:
-                    self.queued_trades.discard(trade.get('id'))
-                self.queue.task_done()
-
-    def _loop(self):
-        while self.running:
-            try:
-                open_trades = self.db.get_open_trades()
-                for trade in open_trades:
-                    trade_id = trade.get('id')
-                    with self.queue_lock:
-                        if trade_id in self.queued_trades:
-                            continue
-                        self.queued_trades.add(trade_id)
-                    self.queue.put(trade)
-            except Exception as e:
-                logging.error(f"Advisor loop error: {e}")
-            time.sleep(MONITOR_INTERVAL)
-
-    def _get_trend_alignment(self, side: str, plus_di: float, minus_di: float) -> str:
-        if side == "LONG":
-            return "ALIGNED" if plus_di > minus_di else "CONFLICT"
-        elif side == "SHORT":
-            return "ALIGNED" if minus_di > plus_di else "CONFLICT"
-        return "UNKNOWN"
-
-    def _calculate_reversal_risk(self, data: Dict) -> float:
-        risk = 0.0
-        side = data.get('side', '')
-        adx = data.get('adx', 0)
-        rsi = data.get('rsi', 50)
-        plus_di = data.get('plus_di', 0)
-        minus_di = data.get('minus_di', 0)
-
-        if side == "SHORT":
-            if rsi < 30:
-                risk += 20
-            if plus_di > minus_di:
-                risk += 25
-        elif side == "LONG":
-            if rsi > 70:
-                risk += 20
-            if minus_di > plus_di:
-                risk += 25
-
-        if adx < 15:
-            risk += 15
-
-        return min(100.0, risk)
-
-    def _calculate_advisory_score(self, data: Dict) -> float:
-        """
-        درجة تقييم الصفقة (للاستشارة فقط — لا تؤدي لتنفيذ)
-        """
-        score = 50.0
-
-        profit = data.get('profit_pct', 0.0)
-        if profit > 0:
-            score += 10
-        else:
-            score -= 10
-
-        adx = data.get('adx', 0.0)
-        if adx >= 25:
-            score += 10
-        elif adx < 15:
-            score -= 5
-
-        dist_sp = data.get('distance_to_sp_pct', 100.0)
-        atr_pct = data.get('atr_pct', 1.0)
-        if dist_sp < atr_pct * 0.5:
-            score -= 20
-        elif dist_sp < atr_pct:
-            score -= 10
-
-        dist_tp = data.get('distance_to_tp_pct', 0.0)
-        if dist_tp < atr_pct:
-            score += 10
-
-        alignment = data.get('trend_alignment', 'UNKNOWN')
-        if alignment == 'ALIGNED':
-            score += 15
-        elif alignment == 'CONFLICT':
-            score -= 20
-
-        reversal_risk = data.get('reversal_risk', 0)
-        score -= reversal_risk * 0.2
-
-        return max(0.0, min(100.0, score))
-
-    def _calculate_profit_loss(self, entry_price: float, sp_price: float, tp_price: float,
-                                 side: str, qty: float, leverage: int) -> Dict:
-        """
-        حساب الربح المتوقع إذا تحقق TP والخسارة المتوقعة إذا ضرب SP
-        """
-        position_size = entry_price * qty  # حجم المركز بالدولار
-
-        if side == 'LONG':
-            # ربح إذا وصل السعر لـ TP
-            profit_usdt = (tp_price - entry_price) * qty
-            # خسارة إذا وصل السعر لـ SP
-            loss_usdt = (entry_price - sp_price) * qty
-        else:  # SHORT
-            # ربح إذا وصل السعر لـ TP (الذي هو أقل من الدخول)
-            profit_usdt = (entry_price - tp_price) * qty
-            # خسارة إذا وصل السعر لـ SP (الذي هو أعلى من الدخول)
-            loss_usdt = (sp_price - entry_price) * qty
-
-        # مع الرافعة المالية
-        profit_usdt_leveraged = profit_usdt * leverage
-        loss_usdt_leveraged = loss_usdt * leverage
-
-        # نسبة الربح والخسارة من حجم المركز
-        profit_pct = (profit_usdt / max(position_size, 1e-12)) * 100 * leverage
-        loss_pct = (loss_usdt / max(position_size, 1e-12)) * 100 * leverage
-
-        return {
-            'profit_if_tp': profit_usdt_leveraged,
-            'loss_if_sp': loss_usdt_leveraged,
-            'profit_if_tp_pct': profit_pct,
-            'loss_if_sp_pct': loss_pct,
-            'position_size_usdt': position_size,
-        }
-
-    def _analyze_trade(self, trade):
-        trade_id = trade.get('id')
-        symbol = trade.get('symbol', '')
-        entry_price = float(trade.get('entry_price') or 0)
-        side = trade.get('side', '')
-        qty = float(trade.get('qty') or 0)
-        leverage = int(trade.get('leverage_used') or 1)
-
-        # ─── جلب بيانات السوق ───
-        market_data = self.market_cache.get(symbol, {}).get('data', {})
-        if not market_data or time.time() - self.market_cache.get(symbol, {}).get('time', 0) > 300:
-            market_data = self.analytics.analyze_market(symbol)
-            self.market_cache[symbol] = {'data': market_data, 'time': time.time()}
-
-        if 'error' in market_data:
-            return
-
-        current_price = market_data.get('price', entry_price)
-        ohlcv = market_data.get('ohlcv', [])
-
-        # ─── حساب ATR بنفس طريقة QUANTUM APEX v4.0 ───
-        atr = self.analytics.compute_atr(ohlcv, ATR_PERIOD)
-        atr = max(atr, entry_price * ATR_SAFETY_FLOOR_PCT)  # حد أدنى للسلامة
-
-        # ─── حساب SP و TP بنفس خوارزمية QUANTUM APEX v4.0 ───
-        if side == 'LONG':
-            sp_price = entry_price - (atr * STOP_LOSS_ATR_MULTIPLE)
-            tp_price = entry_price + (atr * TAKE_PROFIT_ATR_MULTIPLE)
-        else:
-            sp_price = entry_price + (atr * STOP_LOSS_ATR_MULTIPLE)
-            tp_price = entry_price - (atr * TAKE_PROFIT_ATR_MULTIPLE)
-
-        # ─── حساب الربح والخسارة المتوقع ───
-        pnl_calc = self._calculate_profit_loss(
-            entry_price, sp_price, tp_price, side, qty, leverage
-        )
-
-        # ─── حساب الربح الحالي ───
-        if entry_price > 0:
-            if side == 'LONG':
-                profit_pct = ((current_price - entry_price) / entry_price) * 100
-            else:
-                profit_pct = ((entry_price - current_price) / entry_price) * 100
-        else:
-            profit_pct = 0.0
-
-        # ─── مدة الصفقة ───
-        try:
-            opened_at = datetime.fromisoformat(trade.get('timestamp', '').replace("Z", "+00:00"))
-            time_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
-        except:
-            time_open = 0
-
-        # ─── مسافات SP و TP ───
-        if sp_price > 0 and tp_price > 0 and entry_price > 0:
-            if side == 'LONG':
-                dist_tp_pct = ((tp_price - current_price) / current_price) * 100
-                dist_sp_pct = ((current_price - sp_price) / current_price) * 100
-                rr_ratio = abs(tp_price - entry_price) / abs(entry_price - sp_price) if abs(entry_price - sp_price) > 0 else 0
-                target_progress = (current_price - entry_price) / (tp_price - entry_price) * 100 if tp_price != entry_price else 0
-            else:
-                dist_tp_pct = ((current_price - tp_price) / current_price) * 100
-                dist_sp_pct = ((sp_price - current_price) / current_price) * 100
-                rr_ratio = abs(entry_price - tp_price) / abs(sp_price - entry_price) if abs(sp_price - entry_price) > 0 else 0
-                target_progress = (entry_price - current_price) / (entry_price - tp_price) * 100 if entry_price != tp_price else 0
-            target_progress = max(0, min(100, target_progress))
-        else:
-            dist_tp_pct = 0.0
-            dist_sp_pct = 0.0
-            rr_ratio = 0.0
-            target_progress = 0.0
-
-        # ─── مؤشرات السوق ───
-        di = self.analytics.adx_di(ohlcv)
-        adx = di['adx']
-        plus_di = di['plus_di']
-        minus_di = di['minus_di']
-        rsi = self.analytics.real_rsi(ohlcv)
-        atr_pct = self.analytics.get_atr_pct(ohlcv)
-        funding = self.analytics.funding_rate(symbol)
-        regime = market_data.get('market_structure', 'UNKNOWN')
-
-        trend_alignment = self._get_trend_alignment(side, plus_di, minus_di)
-        reversal_risk = self._calculate_reversal_risk({
-            'side': side, 'adx': adx, 'rsi': rsi,
-            'plus_di': plus_di, 'minus_di': minus_di
-        })
-
-        # ─── إعداد بيانات AI ───
-        current_data = {
-            'symbol': symbol,
-            'side': side,
-            'entry_price': entry_price,
-            'current_price': current_price,
-            'profit_pct': profit_pct,
-            'time_open_minutes': int(time_open),
-            'target_progress': target_progress,
-            'trend_strength_adx': adx,
-            'rsi_14': rsi,
-            'atr_pct': atr_pct,
-            'funding_rate': funding,
-            'market_regime': regime,
-            'sp_price': sp_price,
-            'tp_price': tp_price,
-            'distance_to_tp_pct': max(0, dist_tp_pct),
-            'distance_to_sp_pct': max(0, dist_sp_pct),
-            'risk_reward': rr_ratio,
-            'profit_if_tp': pnl_calc['profit_if_tp'],
-            'loss_if_sp': pnl_calc['loss_if_sp'],
-            'profit_if_tp_pct': pnl_calc['profit_if_tp_pct'],
-            'loss_if_sp_pct': pnl_calc['loss_if_sp_pct'],
-        }
-
-        # ─── استدعاء AI (مع التحكم في المعدل) ───
-        now = time.time()
-        last_ai = self.last_ai_time.get(trade_id, 0)
-        use_cached = (now - last_ai) < AI_DECISION_INTERVAL
-
-        if use_cached:
-            cached = self.db.get_latest_analysis(trade_id)
-            if cached:
-                ai_recommendation = cached.get('ai_decision', 'HOLD')
-                ai_confidence = cached.get('ai_confidence', 50)
-                ai_explanation = cached.get('ai_explanation', '')
-                tp_probability = cached.get('probability_tp', 0)
-                sl_probability = cached.get('probability_sl', 0)
-                sideways_probability = cached.get('probability_sideways', 0)
-                reversal_probability = cached.get('probability_reversal', 0)
-            else:
-                use_cached = False
-
-        if not use_cached:
-            with self.ai_lock:
-                logging.info(f"🔄 Calling AI for {symbol} (last AI was {now - last_ai:.0f}s ago)")
-                ai_result = self.ai.get_advice(current_data)
-                self.last_ai_time[trade_id] = now
-                ai_recommendation = ai_result.get('recommendation', 'HOLD')
-                ai_confidence = ai_result.get('confidence', 0)
-                ai_explanation = ai_result.get('reason', '')
-                tp_probability = ai_result.get('tp_probability', 0)
-                sl_probability = ai_result.get('sl_probability', 0)
-                sideways_probability = ai_result.get('sideways_probability', 0)
-                reversal_probability = ai_result.get('reversal_probability', 0)
-
-        # ─── حساب درجة التقييم ───
-        advisory_score = self._calculate_advisory_score({
-            'profit_pct': profit_pct,
-            'adx': adx,
-            'atr_pct': atr_pct,
-            'distance_to_sp_pct': dist_sp_pct,
-            'distance_to_tp_pct': dist_tp_pct,
-            'trend_alignment': trend_alignment,
-            'reversal_risk': reversal_risk,
-        })
-
-        # ─── تسجيل التحليل في قاعدة البيانات ───
-        analysis_record = {
-            'trade_id': trade_id,
-            'symbol': symbol,
-            'side': side,
-            'entry_price': entry_price,
-            'current_price': current_price,
-            'sp_price': sp_price,
-            'tp_price': tp_price,
-            'profit_if_tp': pnl_calc['profit_if_tp'],
-            'loss_if_sp': pnl_calc['loss_if_sp'],
-            'profit_if_tp_pct': pnl_calc['profit_if_tp_pct'],
-            'loss_if_sp_pct': pnl_calc['loss_if_sp_pct'],
-            'position_size_usdt': pnl_calc['position_size_usdt'],
-            'leverage': leverage,
-            'profit_pct': profit_pct,
-            'time_open_minutes': int(time_open),
-            'target_progress': target_progress,
-            'trend_strength': adx,
-            'momentum_score': rsi,
-            'funding_rate': funding,
-            'market_regime': regime,
-            'atr_value': atr,
-            'atr_pct': atr_pct,
-            'ai_decision': ai_recommendation,
-            'ai_confidence': ai_confidence,
-            'ai_explanation': ai_explanation,
-            'recommendation': ai_recommendation,
-            'probability_tp': tp_probability,
-            'probability_sl': sl_probability,
-            'probability_sideways': sideways_probability,
-            'probability_reversal': reversal_probability,
-            'risk_reward_ratio': rr_ratio,
-            'trend_alignment': trend_alignment,
-            'reversal_risk': reversal_risk,
-            'management_score': advisory_score,
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
-        self.db.save_kaf_analysis(analysis_record)
-
-        logging.info(
-            f"✅ KAF Analysis | {symbol} | SP={sp_price:.4f} | TP={tp_price:.4f} | "
-            f"Profit_IF_TP=+{pnl_calc['profit_if_tp']:.2f}USDT | Loss_IF_SP=-{pnl_calc['loss_if_sp']:.2f}USDT | "
-            f"AI={ai_recommendation} ({ai_confidence:.0f}%) | Score={advisory_score:.1f}"
-        )
-
-# =============================================================================
-# 🚀 MAIN
-# =============================================================================
-
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-    logging.info("🚀 Starting APEX KAF ADVISOR BOT v5.0 (Advisory Only — No Execution)")
-    logging.info(f"📌 SP: ATR × {STOP_LOSS_ATR_MULTIPLE} | TP: ATR × {TAKE_PROFIT_ATR_MULTIPLE} (from QUANTUM APEX v4.0)")
-
-    exchange_public = ccxt.binance({
-        "enableRateLimit": True,
-        "options": {
-            "defaultType": "swap",
-            "adjustForTimeDifference": True
-        }
-    })
-
-    try:
-        exchange_public.load_markets()
-    except Exception as e:
-        logging.warning(f"Load markets warning: {e}")
-
-    db = MonitorDB(MONITOR_DB_PATH)
-    analytics = AdvancedAnalyticsEngine(exchange_public)
-    ai = AIClient()
-
-    # اختبار الاتصال بالنموذج
-    try:
-        logging.info(f"🧪 Testing {AI_MODEL} connection...")
-        test_response = ai.client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[{"role": "user", "content": "Reply with exactly: LAGUNA-OK"}],
-            temperature=0,
-            max_tokens=20,
-            timeout=10.0,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}}
-        )
-        test_content = test_response.choices[0].message.content.strip()
-        logging.info(f"✅ AI TEST SUCCESS: {test_content}")
-    except Exception as e:
-        logging.error(f"❌ AI TEST FAILED: {type(e).__name__}: {e}")
-        logging.warning("⚠️ AI test failed, but bot will continue.")
-
-    # بدء حلقة المراقبة الاستشارية
-    advisor = AdvisorLoop(db, analytics, ai)
-    advisor.start()jjjjjjjjjjjjjjjuyg;:+-&&__&&&-+9876¥^÷÷√
-
-    # بدء بوت تيليجرام
-    telegram_bot = TelegramBot(TELEGRAM_TOKEN, ADMIN_CHAT_ID, db, analytics)
-    telegram_bot.run()
+            logging.error("TELEGRAM ERROR: %s", e)
+            await asyncio.sleep(5)
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+    logging.info("%s STARTING", APP_NAME)
+    await asyncio.to_thread(init_database)
+
+    await asyncio.gather(
+        websocket_worker(),
+        research_loop(),
+        telegram_loop(),
+    )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
