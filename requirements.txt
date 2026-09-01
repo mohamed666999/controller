@@ -11,3 +11,4 @@ requests
 websockets
 pandas
 psycopg2-binary
+ccxt>=4.5.0
