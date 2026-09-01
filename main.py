@@ -163,92 +163,107 @@ state = {
 # ============================================================
 
 def db_connect():
-    return psycopg2.connect(DATABASE_URL)
+    """محاولة الاتصال بقاعدة البيانات مع تسجيل الأخطاء"""
+    try:
+        return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        logging.error("❌ Database connection failed: %s", e)
+        logging.error(traceback.format_exc())
+        raise
 
 def init_database():
-    sql = """
-    CREATE TABLE IF NOT EXISTS algorithms (
-        id BIGSERIAL PRIMARY KEY,
-        lab TEXT NOT NULL,
-        symbol TEXT,
-        agent_id INTEGER,
-        agent_name TEXT,
-        model_name TEXT,
-        hypothesis TEXT,
-        code TEXT NOT NULL,
-        score DOUBLE PRECISION DEFAULT 0,
-        win_rate DOUBLE PRECISION DEFAULT 0,
-        profit_factor DOUBLE PRECISION DEFAULT 0,
-        max_drawdown DOUBLE PRECISION DEFAULT 0,
-        status TEXT DEFAULT 'RESEARCH',
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS agent_logs (
-        id BIGSERIAL PRIMARY KEY,
-        agent_id INTEGER,
-        agent_name TEXT,
-        status TEXT,
-        message TEXT,
-        duration_ms BIGINT,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS backtests (
-        id BIGSERIAL PRIMARY KEY,
-        algorithm_id BIGINT REFERENCES algorithms(id),
-        symbol TEXT,
-        total_trades INTEGER DEFAULT 0,
-        wins INTEGER DEFAULT 0,
-        losses INTEGER DEFAULT 0,
-        win_rate DOUBLE PRECISION DEFAULT 0,
-        profit_factor DOUBLE PRECISION DEFAULT 0,
-        max_drawdown DOUBLE PRECISION DEFAULT 0,
-        score DOUBLE PRECISION DEFAULT 0,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS paper_trades (
-        id BIGSERIAL PRIMARY KEY,
-        algorithm_id BIGINT REFERENCES algorithms(id),
-        symbol TEXT,
-        side TEXT,
-        entry_price DOUBLE PRECISION,
-        take_profit DOUBLE PRECISION,
-        stop_loss DOUBLE PRECISION,
-        exit_price DOUBLE PRECISION,
-        status TEXT DEFAULT 'OPEN',
-        pnl_percent DOUBLE PRECISION DEFAULT 0,
-        opened_at TIMESTAMPTZ DEFAULT NOW(),
-        closed_at TIMESTAMPTZ
-    );
-
-    -- جدول منفصل لحفظ المؤشرات إن أردت (اختياري)
-    CREATE TABLE IF NOT EXISTS indicators (
-        id BIGSERIAL PRIMARY KEY,
-        algorithm_id BIGINT REFERENCES algorithms(id),
-        symbol TEXT,
-        indicator_name TEXT,
-        indicator_value JSONB,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    """
-    conn = db_connect()
+    """إنشاء الجداول مع تسجيل الأخطاء وعدم التوقف"""
     try:
+        conn = db_connect()
+        logging.info("✅ Connected to database successfully")
         cur = conn.cursor()
+
+        sql = """
+        CREATE TABLE IF NOT EXISTS algorithms (
+            id BIGSERIAL PRIMARY KEY,
+            lab TEXT NOT NULL,
+            symbol TEXT,
+            agent_id INTEGER,
+            agent_name TEXT,
+            model_name TEXT,
+            hypothesis TEXT,
+            code TEXT NOT NULL,
+            score DOUBLE PRECISION DEFAULT 0,
+            win_rate DOUBLE PRECISION DEFAULT 0,
+            profit_factor DOUBLE PRECISION DEFAULT 0,
+            max_drawdown DOUBLE PRECISION DEFAULT 0,
+            status TEXT DEFAULT 'RESEARCH',
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_logs (
+            id BIGSERIAL PRIMARY KEY,
+            agent_id INTEGER,
+            agent_name TEXT,
+            status TEXT,
+            message TEXT,
+            duration_ms BIGINT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS backtests (
+            id BIGSERIAL PRIMARY KEY,
+            algorithm_id BIGINT REFERENCES algorithms(id),
+            symbol TEXT,
+            total_trades INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            win_rate DOUBLE PRECISION DEFAULT 0,
+            profit_factor DOUBLE PRECISION DEFAULT 0,
+            max_drawdown DOUBLE PRECISION DEFAULT 0,
+            score DOUBLE PRECISION DEFAULT 0,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id BIGSERIAL PRIMARY KEY,
+            algorithm_id BIGINT REFERENCES algorithms(id),
+            symbol TEXT,
+            side TEXT,
+            entry_price DOUBLE PRECISION,
+            take_profit DOUBLE PRECISION,
+            stop_loss DOUBLE PRECISION,
+            exit_price DOUBLE PRECISION,
+            status TEXT DEFAULT 'OPEN',
+            pnl_percent DOUBLE PRECISION DEFAULT 0,
+            opened_at TIMESTAMPTZ DEFAULT NOW(),
+            closed_at TIMESTAMPTZ
+        );
+
+        CREATE TABLE IF NOT EXISTS indicators (
+            id BIGSERIAL PRIMARY KEY,
+            algorithm_id BIGINT REFERENCES algorithms(id),
+            symbol TEXT,
+            indicator_name TEXT,
+            indicator_value JSONB,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        """
         cur.execute(sql)
         conn.commit()
-    finally:
+        cur.close()
         conn.close()
-    logging.info("DATABASE READY")
+        logging.info("✅ All tables created successfully")
+        return True
+
+    except Exception as e:
+        logging.error("❌ init_database FAILED: %s", e)
+        logging.error(traceback.format_exc())
+        return False
 
 # ============================================================
-# DATABASE HELPERS
+# DATABASE HELPERS (مع تحسينات للتعامل مع فشل الاتصال)
 # ============================================================
 
 def log_agent(agent, status, message, duration_ms=0):
-    conn = db_connect()
+    """تسجيل سجل الوكيل، مع تجاهل الأخطاء إذا فشلت قاعدة البيانات"""
     try:
+        conn = db_connect()
         cur = conn.cursor()
         cur.execute(
             """
@@ -259,12 +274,15 @@ def log_agent(agent, status, message, duration_ms=0):
             (agent["id"], agent["name"], status, str(message)[:5000], duration_ms)
         )
         conn.commit()
-    finally:
+        cur.close()
         conn.close()
+    except Exception as e:
+        logging.warning("⚠️ Could not log to database: %s", e)
 
 def save_algorithm(agent, symbol, hypothesis, code):
-    conn = db_connect()
+    """حفظ الخوارزمية، مع إرجاع None إذا فشل"""
     try:
+        conn = db_connect()
         cur = conn.cursor()
         cur.execute(
             """
@@ -277,13 +295,19 @@ def save_algorithm(agent, symbol, hypothesis, code):
         )
         algorithm_id = cur.fetchone()[0]
         conn.commit()
-        return algorithm_id
-    finally:
+        cur.close()
         conn.close()
+        return algorithm_id
+    except Exception as e:
+        logging.error("❌ Failed to save algorithm: %s", e)
+        return None
 
 def update_algorithm_score(algorithm_id, result):
-    conn = db_connect()
+    """تحديث نتيجة الاختبار، مع تجاهل الأخطاء"""
+    if algorithm_id is None:
+        return
     try:
+        conn = db_connect()
         cur = conn.cursor()
         cur.execute(
             """
@@ -306,39 +330,17 @@ def update_algorithm_score(algorithm_id, result):
              result["profit_factor"], result["max_drawdown"], result["score"])
         )
         conn.commit()
-    finally:
+        cur.close()
         conn.close()
-
-def save_paper_trade(algorithm_id, trade):
-    """
-    trade: dict with keys: symbol, side, entry_price, take_profit, stop_loss,
-           exit_price, status, pnl_percent, opened_at, closed_at
-    """
-    conn = db_connect()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO paper_trades
-            (algorithm_id, symbol, side, entry_price, take_profit, stop_loss,
-             exit_price, status, pnl_percent, opened_at, closed_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (algorithm_id, trade["symbol"], trade["side"], trade["entry_price"],
-             trade["take_profit"], trade["stop_loss"], trade["exit_price"],
-             trade["status"], trade["pnl_percent"],
-             trade["opened_at"], trade["closed_at"])
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    except Exception as e:
+        logging.error("❌ Failed to update algorithm score: %s", e)
 
 def save_trades_batch(algorithm_id, trades):
-    """حفظ مجموعة صفقات دفعة واحدة"""
-    if not trades:
+    """حفظ صفقات محاكاة، مع تجاهل الأخطاء"""
+    if not trades or algorithm_id is None:
         return
-    conn = db_connect()
     try:
+        conn = db_connect()
         cur = conn.cursor()
         for trade in trades:
             cur.execute(
@@ -354,8 +356,66 @@ def save_trades_batch(algorithm_id, trades):
                  trade["opened_at"], trade["closed_at"])
             )
         conn.commit()
-    finally:
+        cur.close()
         conn.close()
+    except Exception as e:
+        logging.error("❌ Failed to save trades: %s", e)
+
+# بقية دوال المساعدة (get_best_algorithm, إلخ) ستبقى كما هي مع إضافة try/except
+# للتجنب الانهيار عند فشل الاتصال.
+
+def get_best_algorithm():
+    try:
+        conn = db_connect()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT * FROM algorithms
+            WHERE status='TESTED'
+            ORDER BY score DESC
+            LIMIT 1
+        """)
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        return result
+    except Exception as e:
+        logging.warning("⚠️ Could not fetch best algorithm: %s", e)
+        return None
+
+def get_recent_trades(limit=10):
+    try:
+        conn = db_connect()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT * FROM paper_trades
+            ORDER BY opened_at DESC
+            LIMIT %s
+        """, (limit,))
+        result = cur.fetchall()
+        cur.close()
+        conn.close()
+        return result
+    except Exception as e:
+        logging.warning("⚠️ Could not fetch trades: %s", e)
+        return []
+
+def get_algorithms_list(limit=5):
+    try:
+        conn = db_connect()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT id, agent_name, symbol, score, created_at
+            FROM algorithms
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,))
+        result = cur.fetchall()
+        cur.close()
+        conn.close()
+        return result
+    except Exception as e:
+        logging.warning("⚠️ Could not fetch algorithm list: %s", e)
+        return []
 
 # ============================================================
 # BINANCE USDⓈ-M WEBSOCKET
@@ -868,6 +928,8 @@ async def research_cycle():
                 continue
 
             algorithm_id = save_algorithm(agent, symbol.upper(), hypothesis, code)
+            if algorithm_id is None:
+                continue
 
             # Backtest مع حفظ الصفقات
             result_bt = backtest(symbol, code, algorithm_id=algorithm_id)
@@ -895,51 +957,6 @@ async def research_loop():
         await asyncio.sleep(30 * 60)  # كل 30 دقيقة
 
 # ============================================================
-# LOCAL PAPER TRADE MONITOR (استعلامات)
-# ============================================================
-
-def get_best_algorithm():
-    conn = db_connect()
-    try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
-            SELECT * FROM algorithms
-            WHERE status='TESTED'
-            ORDER BY score DESC
-            LIMIT 1
-        """)
-        return cur.fetchone()
-    finally:
-        conn.close()
-
-def get_recent_trades(limit=10):
-    conn = db_connect()
-    try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
-            SELECT * FROM paper_trades
-            ORDER BY opened_at DESC
-            LIMIT %s
-        """, (limit,))
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-def get_algorithms_list(limit=5):
-    conn = db_connect()
-    try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
-            SELECT id, agent_name, symbol, score, created_at
-            FROM algorithms
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (limit,))
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-# ============================================================
 # TELEGRAM API (بدون مكتبة إضافية)
 # ============================================================
 
@@ -962,6 +979,10 @@ async def telegram_loop():
                 "getUpdates",
                 {"offset": TELEGRAM_OFFSET, "timeout": 30}
             )
+
+            # تسجيل كل تحديث يرد من Telegram
+            logging.info("📩 TELEGRAM UPDATE: %s", data)
+
             for update in data.get("result", []):
                 TELEGRAM_OFFSET = update["update_id"] + 1
                 message = update.get("message", {})
@@ -1021,13 +1042,16 @@ ID: {best["id"]}
                         reply = "استعمل:\n/code ID"
                     else:
                         algorithm_id = parts[1]
-                        conn = db_connect()
                         try:
+                            conn = db_connect()
                             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                             cur.execute("SELECT * FROM algorithms WHERE id=%s", (algorithm_id,))
                             algo = cur.fetchone()
-                        finally:
+                            cur.close()
                             conn.close()
+                        except Exception as e:
+                            logging.warning("⚠️ Failed to fetch algorithm: %s", e)
+                            algo = None
                         if not algo:
                             reply = "❌ Algorithm not found"
                         else:
@@ -1092,8 +1116,24 @@ Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent
 
 async def main():
     logging.info("%s STARTING", APP_NAME)
-    await asyncio.to_thread(init_database)
 
+    # التحقق من DATABASE_URL
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url or db_url.startswith("postgresql://USER:"):
+        logging.error("❌ DATABASE_URL is not set or is invalid. Please set it in Railway environment variables.")
+        logging.error("   Example: postgresql://user:pass@host:port/dbname")
+        # نستمر بدون قاعدة بيانات للاختبار
+    else:
+        try:
+            success = await asyncio.to_thread(init_database)
+            if success:
+                logging.info("✅ Database initialized successfully.")
+            else:
+                logging.warning("⚠️ Database initialization failed, but bot will continue.")
+        except Exception as e:
+            logging.error("❌ Exception during database init: %s", e)
+
+    # تشغيل المهام الأساسية
     await asyncio.gather(
         websocket_worker(),
         research_loop(),
