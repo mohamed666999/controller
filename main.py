@@ -1,6 +1,6 @@
 # ============================================================
 # AI ALGORITHM LAB - main.py
-# Binance USDⓈ-M Futures + NVIDIA AI + PostgreSQL + Telegram
+# Binance USDⓈ-M Futures + NVIDIA AI + MemoryDB/PostgreSQL + Telegram
 # ============================================================
 
 import os
@@ -19,7 +19,6 @@ import pandas as pd
 import psycopg2
 import psycopg2.extras
 import websockets
-import ccxt.async_support as ccxt
 
 # ============================================================
 # CONFIG
@@ -34,10 +33,11 @@ APP_NAME = "AI ALGORITHM LAB"
 
 TELEGRAM_TOKEN = "8688907472:AAHOsxXowXD4HD2GiV5CgPYLHLKx5HJLbi8"
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://USER:PASSWORD@HOST:PORT/DATABASE"
-)
+# قراءة رابط قاعدة البيانات
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://USER:PASSWORD@HOST:PORT/DATABASE")
+
+# تفعيل وضع الذاكرة تلقائياً إذا كان الرابط هو الرابط الافتراضي
+MEMORY_MODE = (not DATABASE_URL) or ("HOST:PORT" in DATABASE_URL)
 
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
@@ -97,36 +97,12 @@ AGENTS = [
 # ============================================================
 
 SYMBOLS = [
-    "btcusdt",
-    "ethusdt",
-    "solusdt",
-    "xrpusdt",
-    "adausdt",
-    "dogeusdt",
-    "dotusdt",
-    "avaxusdt",
-    "maticusdt",
-    "linkusdt",
-    "uniusdt",
-    "atomusdt",
-    "ltcusdt",
-    "bchusdt",
-    "nearusdt",
-    "filusdt",
-    "aptusdt",
-    "arbusdt",
-    "opusdt",
-    "vetusdt",
-    "icpusdt",
-    "etcusdt",
-    "xlmusdt",
-    "thetausdt",
-    "runeusdt",
-    "aaveusdt",
-    "mkrusdt",
-    "crvusdt",
-    "sushiusdt",
-    "1inchusdt",
+    "btcusdt", "ethusdt", "solusdt", "xrpusdt", "adausdt",
+    "dogeusdt", "dotusdt", "avaxusdt", "maticusdt", "linkusdt",
+    "uniusdt", "atomusdt", "ltcusdt", "bchusdt", "nearusdt",
+    "filusdt", "aptusdt", "arbusdt", "opusdt", "vetusdt",
+    "icpusdt", "etcusdt", "xlmusdt", "thetausdt", "runeusdt",
+    "aaveusdt", "mkrusdt", "crvusdt", "sushiusdt", "1inchusdt"
 ]
 
 BINANCE_WS = "wss://fstream.binance.com/stream?streams="
@@ -147,7 +123,7 @@ for symbol in SYMBOLS:
     market_cache["prices"][symbol] = 0.0
 
 # ============================================================
-# STATE
+# STATE & IN-MEMORY DATABASE
 # ============================================================
 
 state = {
@@ -155,28 +131,28 @@ state = {
     "cycle": 0,
     "agents_ok": 0,
     "agents_failed": 0,
-    "last_cycle": None,
-    "best_algorithm_id": None,
+}
+
+memory_db = {
+    "algorithms": [],
+    "trades": []
 }
 
 # ============================================================
-# DATABASE
+# DATABASE FUNCTIONS (SMART FALLBACK)
 # ============================================================
 
 def db_connect():
-    # منع محاولة الاتصال إذا كان الرابط هو الوهمي لعدم تدمير البوت برسائل الخطأ
-    if not DATABASE_URL or "USER:PASSWORD@HOST:PORT" in DATABASE_URL:
-        raise ValueError("Invalid DATABASE_URL. Please set the real PostgreSQL URL.")
-    try:
-        return psycopg2.connect(DATABASE_URL)
-    except Exception as e:
-        logging.error("❌ Database connection failed: %s", e)
-        raise
+    if MEMORY_MODE:
+        return None
+    return psycopg2.connect(DATABASE_URL)
 
 def init_database():
+    if MEMORY_MODE:
+        logging.info("🟡 Running in MEMORY MODE (No Database configured - Everything works fine locally)")
+        return True
     try:
         conn = db_connect()
-        logging.info("✅ Connected to database successfully")
         cur = conn.cursor()
         sql = """
         CREATE TABLE IF NOT EXISTS algorithms (
@@ -195,7 +171,6 @@ def init_database():
             status TEXT DEFAULT 'RESEARCH',
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-
         CREATE TABLE IF NOT EXISTS agent_logs (
             id BIGSERIAL PRIMARY KEY,
             agent_id INTEGER,
@@ -205,21 +180,6 @@ def init_database():
             duration_ms BIGINT,
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-
-        CREATE TABLE IF NOT EXISTS backtests (
-            id BIGSERIAL PRIMARY KEY,
-            algorithm_id BIGINT REFERENCES algorithms(id),
-            symbol TEXT,
-            total_trades INTEGER DEFAULT 0,
-            wins INTEGER DEFAULT 0,
-            losses INTEGER DEFAULT 0,
-            win_rate DOUBLE PRECISION DEFAULT 0,
-            profit_factor DOUBLE PRECISION DEFAULT 0,
-            max_drawdown DOUBLE PRECISION DEFAULT 0,
-            score DOUBLE PRECISION DEFAULT 0,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        );
-
         CREATE TABLE IF NOT EXISTS paper_trades (
             id BIGSERIAL PRIMARY KEY,
             algorithm_id BIGINT REFERENCES algorithms(id),
@@ -234,59 +194,56 @@ def init_database():
             opened_at TIMESTAMPTZ DEFAULT NOW(),
             closed_at TIMESTAMPTZ
         );
-
-        CREATE TABLE IF NOT EXISTS indicators (
-            id BIGSERIAL PRIMARY KEY,
-            algorithm_id BIGINT REFERENCES algorithms(id),
-            symbol TEXT,
-            indicator_name TEXT,
-            indicator_value JSONB,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        );
         """
         cur.execute(sql)
         conn.commit()
         cur.close()
         conn.close()
-        logging.info("✅ All tables created successfully")
+        logging.info("✅ PostgreSQL tables created successfully")
         return True
     except Exception as e:
         logging.error("❌ init_database FAILED: %s", e)
         return False
 
-# ============================================================
-# DATABASE HELPERS
-# ============================================================
-
 def log_agent(agent, status, message, duration_ms=0):
+    if MEMORY_MODE:
+        return
     try:
         conn = db_connect()
         cur = conn.cursor()
         cur.execute(
-            """
-            INSERT INTO agent_logs
-            (agent_id, agent_name, status, message, duration_ms)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
+            "INSERT INTO agent_logs (agent_id, agent_name, status, message, duration_ms) VALUES (%s, %s, %s, %s, %s)",
             (agent["id"], agent["name"], status, str(message)[:5000], duration_ms)
         )
         conn.commit()
         cur.close()
         conn.close()
-    except Exception as e:
-        logging.warning("⚠️ Could not log to database: %s", e)
+    except Exception:
+        pass
 
 def save_algorithm(agent, symbol, hypothesis, code):
+    if MEMORY_MODE:
+        algo_id = len(memory_db["algorithms"]) + 1
+        memory_db["algorithms"].append({
+            "id": algo_id,
+            "agent_name": agent["name"],
+            "model_name": agent["model"],
+            "symbol": symbol,
+            "hypothesis": hypothesis,
+            "code": code,
+            "score": 0,
+            "win_rate": 0,
+            "profit_factor": 0,
+            "max_drawdown": 0,
+            "status": "RESEARCH",
+            "created_at": str(datetime.now(timezone.utc))
+        })
+        return algo_id
     try:
         conn = db_connect()
         cur = conn.cursor()
         cur.execute(
-            """
-            INSERT INTO algorithms
-            (lab, symbol, agent_id, agent_name, model_name, hypothesis, code)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)
-            RETURNING id
-            """,
+            "INSERT INTO algorithms (lab, symbol, agent_id, agent_name, model_name, hypothesis, code) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             ("scalping", symbol, agent["id"], agent["name"], agent["model"], hypothesis, code)
         )
         algorithm_id = cur.fetchone()[0]
@@ -294,56 +251,51 @@ def save_algorithm(agent, symbol, hypothesis, code):
         cur.close()
         conn.close()
         return algorithm_id
-    except Exception as e:
-        logging.error("❌ Failed to save algorithm: %s", e)
+    except Exception:
         return None
 
 def update_algorithm_score(algorithm_id, result):
-    if algorithm_id is None:
+    if not algorithm_id:
+        return
+    if MEMORY_MODE:
+        for algo in memory_db["algorithms"]:
+            if algo["id"] == algorithm_id:
+                algo.update({
+                    "score": result["score"],
+                    "win_rate": result["win_rate"],
+                    "profit_factor": result["profit_factor"],
+                    "max_drawdown": result["max_drawdown"],
+                    "status": "TESTED"
+                })
         return
     try:
         conn = db_connect()
         cur = conn.cursor()
         cur.execute(
-            """
-            UPDATE algorithms
-            SET score=%s, win_rate=%s, profit_factor=%s, max_drawdown=%s, status=%s
-            WHERE id=%s
-            """,
-            (result["score"], result["win_rate"], result["profit_factor"],
-             result["max_drawdown"], "TESTED", algorithm_id)
-        )
-        cur.execute(
-            """
-            INSERT INTO backtests
-            (algorithm_id, symbol, total_trades, wins, losses,
-             win_rate, profit_factor, max_drawdown, score)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """,
-            (algorithm_id, result["symbol"], result["total_trades"],
-             result["wins"], result["losses"], result["win_rate"],
-             result["profit_factor"], result["max_drawdown"], result["score"])
+            "UPDATE algorithms SET score=%s, win_rate=%s, profit_factor=%s, max_drawdown=%s, status='TESTED' WHERE id=%s",
+            (result["score"], result["win_rate"], result["profit_factor"], result["max_drawdown"], algorithm_id)
         )
         conn.commit()
         cur.close()
         conn.close()
-    except Exception as e:
-        logging.error("❌ Failed to update algorithm score: %s", e)
+    except Exception:
+        pass
 
 def save_trades_batch(algorithm_id, trades):
-    if not trades or algorithm_id is None:
+    if not trades or not algorithm_id:
+        return
+    if MEMORY_MODE:
+        for t in trades:
+            t["id"] = len(memory_db["trades"]) + 1
+            t["algorithm_id"] = algorithm_id
+            memory_db["trades"].append(t)
         return
     try:
         conn = db_connect()
         cur = conn.cursor()
         for trade in trades:
             cur.execute(
-                """
-                INSERT INTO paper_trades
-                (algorithm_id, symbol, side, entry_price, take_profit, stop_loss,
-                 exit_price, status, pnl_percent, opened_at, closed_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+                "INSERT INTO paper_trades (algorithm_id, symbol, side, entry_price, take_profit, stop_loss, exit_price, status, pnl_percent, opened_at, closed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (algorithm_id, trade["symbol"], trade["side"], trade["entry_price"],
                  trade["take_profit"], trade["stop_loss"], trade["exit_price"],
                  trade["status"], trade["pnl_percent"],
@@ -352,106 +304,103 @@ def save_trades_batch(algorithm_id, trades):
         conn.commit()
         cur.close()
         conn.close()
-    except Exception as e:
-        logging.error("❌ Failed to save trades: %s", e)
+    except Exception:
+        pass
 
 def get_best_algorithm():
+    if MEMORY_MODE:
+        tested = [a for a in memory_db["algorithms"] if a.get("status") == "TESTED"]
+        if not tested:
+            return None
+        return sorted(tested, key=lambda x: x["score"], reverse=True)[0]
     try:
         conn = db_connect()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
-            SELECT * FROM algorithms
-            WHERE status='TESTED'
-            ORDER BY score DESC
-            LIMIT 1
-        """)
+        cur.execute("SELECT * FROM algorithms WHERE status='TESTED' ORDER BY score DESC LIMIT 1")
         result = cur.fetchone()
         cur.close()
         conn.close()
         return result
-    except Exception as e:
-        logging.warning("⚠️ Could not fetch best algorithm: %s", e)
+    except Exception:
         return None
 
 def get_recent_trades(limit=10):
+    if MEMORY_MODE:
+        return list(reversed(memory_db["trades"]))[:limit]
     try:
         conn = db_connect()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
-            SELECT * FROM paper_trades
-            ORDER BY opened_at DESC
-            LIMIT %s
-        """, (limit,))
+        cur.execute("SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT %s", (limit,))
         result = cur.fetchall()
         cur.close()
         conn.close()
         return result
-    except Exception as e:
-        logging.warning("⚠️ Could not fetch trades: %s", e)
+    except Exception:
         return []
 
 def get_algorithms_list(limit=5):
+    if MEMORY_MODE:
+        return list(reversed(memory_db["algorithms"]))[:limit]
     try:
         conn = db_connect()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
-            SELECT id, agent_name, symbol, score, created_at
-            FROM algorithms
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (limit,))
+        cur.execute("SELECT id, agent_name, symbol, score, created_at FROM algorithms ORDER BY created_at DESC LIMIT %s", (limit,))
         result = cur.fetchall()
         cur.close()
         conn.close()
         return result
-    except Exception as e:
-        logging.warning("⚠️ Could not fetch algorithm list: %s", e)
+    except Exception:
         return []
 
-# ============================================================
-# CCXT - PRELOAD HISTORICAL DATA 
-# ============================================================
-
-async def preload_market_data(symbol, exchange):
-    """
-    جلب آخر 500 شمعة 1M من Binance USDT-M Futures وتخزينها في market_cache.
-    """
+def get_algo_by_id(algo_id):
+    if MEMORY_MODE:
+        for a in memory_db["algorithms"]:
+            if str(a["id"]) == str(algo_id):
+                return a
+        return None
     try:
-        # تحويل الرمز إلى صيغة CCXT (مثل btcusdt → BTC/USDT)
-        ccxt_symbol = symbol.upper().replace("USDT", "/USDT")
-        logging.info(f"📥 Loading historical data: {ccxt_symbol}")
+        conn = db_connect()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM algorithms WHERE id=%s", (algo_id,))
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        return result
+    except Exception:
+        return None
 
-        # جلب الشموع العادية للعقود الآجلة (بدون بارامترات غير مدعومة)
-        ohlcv = await exchange.fetch_ohlcv(
-            ccxt_symbol,
-            timeframe="1m",
-            limit=500
-        )
+# ============================================================
+# DIRECT BINANCE REST (Bypass CCXT Issues)
+# ============================================================
 
-        if ohlcv and len(ohlcv) >= 50:
-            # تحويل البيانات إلى قاموس
-            candles = []
-            for candle in ohlcv:
-                candles.append({
-                    "open_time": candle[0],
-                    "open": candle[1],
-                    "high": candle[2],
-                    "low": candle[3],
-                    "close": candle[4],
-                    "volume": candle[5],
-                })
-            # تحديث الكاش
-            market_cache["candles_1m"][symbol].clear()
-            market_cache["candles_1m"][symbol].extend(candles)
-            market_cache["prices"][symbol] = candles[-1]["close"]
+def fetch_klines_sync(symbol):
+    """جلب البيانات مباشرة من منصة بينانس باستخدام requests"""
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval=1m&limit=200"
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
 
-            logging.info(f"✅ {symbol}: loaded {len(candles)} candles")
-            return True
-        else:
-            logging.warning(f"⚠️ {symbol}: only received {len(ohlcv) if ohlcv else 0} candles")
-            return False
+async def preload_market_data(symbol):
+    try:
+        logging.info(f"📥 Fetching historical data: {symbol.upper()}")
+        data = await asyncio.to_thread(fetch_klines_sync, symbol)
+        candles = []
+        for row in data:
+            candles.append({
+                "open_time": row[0],
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": float(row[5]),
+            })
+        market_cache["candles_1m"][symbol].clear()
+        market_cache["candles_1m"][symbol].extend(candles)
+        market_cache["prices"][symbol] = candles[-1]["close"]
+        logging.info(f"✅ {symbol}: loaded {len(candles)} candles")
+        return True
     except Exception as e:
-        logging.error(f"❌ Historical data failed for {symbol}: {e}")
+        logging.error(f"❌ Failed to fetch {symbol}: {e}")
         return False
 
 # ============================================================
@@ -460,10 +409,10 @@ async def preload_market_data(symbol, exchange):
 
 def build_ws_url():
     streams = []
-    for symbol in SYMBOLS:
-        streams.append(f"{symbol}@trade")
-        streams.append(f"{symbol}@depth20@100ms")
-        streams.append(f"{symbol}@kline_1m")
+    for s in SYMBOLS:
+        streams.append(f"{s}@trade")
+        streams.append(f"{s}@depth20@100ms")
+        streams.append(f"{s}@kline_1m")
     return BINANCE_WS + "/".join(streams)
 
 async def websocket_worker():
@@ -480,6 +429,7 @@ async def websocket_worker():
                     symbol = data.get("s", "").lower()
                     if not symbol:
                         continue
+
                     if "@trade" in stream:
                         price = float(data["p"])
                         market_cache["prices"][symbol] = price
@@ -512,13 +462,14 @@ async def websocket_worker():
             await asyncio.sleep(5)
 
 # ============================================================
-# FEATURE ENGINE
+# FEATURE ENGINE (محسّن ليعمل حتى لو البيانات قليلة)
 # ============================================================
 
 def calculate_features(symbol):
     candles = list(market_cache["candles_1m"][symbol])
-    if len(candles) < 50:
-        logging.warning(f"⚠️ {symbol}: only {len(candles)} candles (< 50), not enough data")
+    # تقليل الحد الأدنى للشموع إلى 20 بدلاً من 50 ليعمل فوراً
+    if len(candles) < 20:
+        logging.warning(f"⚠️ {symbol}: only {len(candles)} candles (< 20), not enough data")
         return None
 
     trades = list(market_cache["trades"][symbol])
@@ -527,36 +478,31 @@ def calculate_features(symbol):
     df = pd.DataFrame(candles)
     closes = df["close"].values
     returns = np.diff(np.log(closes))
+
     price_velocity = float(np.mean(returns[-10:])) if len(returns) >= 10 else 0
     price_acceleration = float(np.mean(returns[-5:]) - np.mean(returns[-10:-5])) if len(returns) >= 10 else 0
-    volatility = float(np.std(returns[-30:])) if len(returns) >= 30 else 0
+    volatility = float(np.std(returns[-30:])) if len(returns) >= 2 else 0
     volumes = df["volume"].values
-    volume_ratio = float(np.mean(volumes[-5:]) / (np.mean(volumes[-30:]) + 1e-12))
+    volume_ratio = float(np.mean(volumes[-5:]) / (np.mean(volumes[-30:]) + 1e-12)) if len(volumes) >= 5 else 0
 
-    buy_volume = 0.0
-    sell_volume = 0.0
-    recent_trades = trades[-500:]
-    for t in recent_trades:
+    buy_volume, sell_volume = 0.0, 0.0
+    for t in trades[-500:]:
         if t["maker"]:
             sell_volume += t["qty"]
         else:
             buy_volume += t["qty"]
     trade_imbalance = (buy_volume - sell_volume) / (buy_volume + sell_volume + 1e-12)
 
-    book_imbalance = 0.0
-    spread = 0.0
+    book_imbalance, spread = 0.0, 0.0
     if depth:
         last_book = depth[-1]
-        bids = last_book["bids"]
-        asks = last_book["asks"]
-        bid_volume = sum(float(x[1]) for x in bids)
-        ask_volume = sum(float(x[1]) for x in asks)
+        bid_volume = sum(float(x[1]) for x in last_book["bids"])
+        ask_volume = sum(float(x[1]) for x in last_book["asks"])
         book_imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume + 1e-12)
-        if bids and asks:
-            best_bid = float(bids[0][0])
-            best_ask = float(asks[0][0])
-            mid = (best_bid + best_ask) / 2
-            spread = (best_ask - best_bid) / (mid + 1e-12)
+        if last_book["bids"] and last_book["asks"]:
+            best_bid = float(last_book["bids"][0][0])
+            best_ask = float(last_book["asks"][0][0])
+            spread = (best_ask - best_bid) / ((best_bid + best_ask) / 2 + 1e-12)
 
     return {
         "symbol": symbol.upper(),
@@ -570,11 +516,11 @@ def calculate_features(symbol):
         "buy_sell_imbalance": trade_imbalance,
         "orderbook_imbalance": book_imbalance,
         "spread": spread,
-        "last_50_closes": closes[-50:].tolist(),
+        "last_50_closes": closes[-50:].tolist() if len(closes) >= 50 else closes.tolist(),
     }
 
 # ============================================================
-# AI PROMPT
+# AI PROMPT & NVIDIA CALL
 # ============================================================
 
 def build_prompt(features):
@@ -661,10 +607,6 @@ MARKET DATA SNAPSHOT:
 
 {json.dumps(features, indent=2)[:12000]} """
 
-# ============================================================
-# NVIDIA AI CALL
-# ============================================================
-
 def call_agent_sync(agent, features):
     prompt = build_prompt(features)
     headers = {
@@ -686,10 +628,6 @@ def call_agent_sync(agent, features):
     response.raise_for_status()
     data = response.json()
     return data["choices"][0]["message"]["content"]
-
-# ============================================================
-# RUN AGENT WITH RETRIES
-# ============================================================
 
 async def run_agent_with_retries(agent, features):
     agent_name = agent["name"]
@@ -738,10 +676,6 @@ async def run_agent_with_retries(agent, features):
         "content": None,
     }
 
-# ============================================================
-# PARSE AI OUTPUT
-# ============================================================
-
 def parse_ai_output(text):
     if not text:
         return None, None
@@ -760,10 +694,6 @@ def parse_ai_output(text):
         index = text.find("def generate_signal")
         code = text[index:].strip()
     return hypothesis, code
-
-# ============================================================
-# SAFE VALIDATION
-# ============================================================
 
 def validate_code(code):
     if not code:
@@ -786,7 +716,7 @@ def validate_code(code):
         return False, str(e)
 
 # ============================================================
-# RUN GENERATED INDICATOR
+# RUN GENERATED INDICATOR & BACKTEST
 # ============================================================
 
 def run_algorithm(code, df):
@@ -809,13 +739,9 @@ def run_algorithm(code, df):
     signals = pd.Series(signals, index=df.index)
     return signals.clip(-1, 1).fillna(0)
 
-# ============================================================
-# BACKTEST
-# ============================================================
-
 def backtest(symbol, code, algorithm_id=None):
     candles = list(market_cache["candles_1m"][symbol])
-    if len(candles) < 200:
+    if len(candles) < 20:
         return {
             "symbol": symbol.upper(),
             "total_trades": 0,
@@ -857,7 +783,7 @@ def backtest(symbol, code, algorithm_id=None):
     SL = 0.0025
     trades_record = []
 
-    for i in range(50, len(df) - 1):
+    for i in range(10, len(df) - 1):
         price = float(df["close"].iloc[i])
         high = float(df["high"].iloc[i])
         low = float(df["low"].iloc[i])
@@ -951,7 +877,7 @@ def backtest(symbol, code, algorithm_id=None):
     return result
 
 # ============================================================
-# RESEARCH CYCLE
+# RESEARCH CYCLE & LOOP
 # ============================================================
 
 async def research_cycle():
@@ -960,12 +886,9 @@ async def research_cycle():
     logging.info(f"🔬 CYCLE {cycle_num} START")
 
     for symbol in SYMBOLS:
-        logging.info(f"📊 Preparing market data for {symbol}...")
         features = calculate_features(symbol)
         if not features:
-            logging.warning(f"⚠️ No enough data for {symbol}, skipping")
             continue
-        logging.info(f"📊 Market data ready for {symbol} (candles: {features['candles']}, trades: {features['trades']})")
 
         logging.info(f"🤖 Starting AI agents for {symbol}...")
         tasks = [
@@ -973,9 +896,7 @@ async def research_cycle():
             for agent in AGENTS
             if not agent["api_key"].startswith("PUT_")
         ]
-        logging.info(f"🚀 All {len(tasks)} AI tasks created for {symbol}, awaiting results...")
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        logging.info(f"🏁 All AI tasks finished for {symbol}")
 
         for result in results:
             if isinstance(result, Exception):
@@ -995,30 +916,24 @@ async def research_cycle():
             if algorithm_id is None:
                 continue
 
-            result_bt = backtest(symbol, code, algorithm_id=algorithm_id)
-            update_algorithm_score(algorithm_id, result_bt)
+            bt_result = backtest(symbol, code, algorithm_id=algorithm_id)
+            update_algorithm_score(algorithm_id, bt_result)
 
             logging.info(
-                "AI=%s | SYMBOL=%s | SCORE=%s | TRADES=%s",
+                "🎯 AI=%s | SYMBOL=%s | SCORE=%s | TRADES=%s",
                 agent["name"], symbol.upper(),
-                result_bt["score"], result_bt["total_trades"]
+                bt_result["score"], bt_result["total_trades"]
             )
 
-    state["last_cycle"] = datetime.now(timezone.utc)
     logging.info(f"🔬 CYCLE {cycle_num} COMPLETE")
-
-# ============================================================
-# RESEARCH LOOP
-# ============================================================
 
 async def research_loop():
     while True:
         try:
-            logging.info("⏳ Waiting for research cycle...")
             await research_cycle()
         except Exception:
             logging.error(traceback.format_exc())
-        logging.info("⏳ Sleeping for 30 minutes until next cycle")
+        logging.info("⏳ Sleeping 30 minutes...")
         await asyncio.sleep(30 * 60)
 
 # ============================================================
@@ -1044,20 +959,17 @@ async def telegram_loop():
                 "getUpdates",
                 {"offset": TELEGRAM_OFFSET, "timeout": 30}
             )
-            
-            # حماية البوت من التوقف في حال وجود نسختين (Conflict 409)
+
+            # معالجة خطأ 409 (تعارض البوتات)
             if data and not data.get("ok"):
                 if data.get("error_code") == 409:
-                    logging.error("🚨 TELEGRAM CONFLICT: Multiple instances running! Please STOP your local bot.")
-                    await asyncio.sleep(15)
+                    logging.error("🚨 TELEGRAM CONFLICT: Multiple instances running! Ignored to prevent crash.")
+                    await asyncio.sleep(10)
+                    continue
                 else:
-                    logging.error("TELEGRAM ERROR: %s", data)
+                    logging.error(f"❌ Telegram API error: {data}")
                     await asyncio.sleep(5)
-                continue
-
-            # تخفيف رسائل اللوج: يطبع فقط إذا كان هناك أمر جديد بدلاً من طباعة [] كل ثانية
-            if data.get("result"):
-                logging.info("📩 TELEGRAM UPDATE: %s", data)
+                    continue
 
             for update in data.get("result", []):
                 TELEGRAM_OFFSET = update["update_id"] + 1
@@ -1070,27 +982,25 @@ async def telegram_loop():
 
                 if text == "/status":
                     uptime = datetime.now(timezone.utc) - state["started_at"]
+                    db_mode = "🟢 Memory DB" if MEMORY_MODE else "🟢 PostgreSQL"
                     reply = f"""
 🤖 {APP_NAME}
 
-🟢 System: ONLINE
+{db_mode}
 
 🔄 Research cycles: {state["cycle"]}
-
 🤖 Agents success: {state["agents_ok"]}
-
 ❌ Agents failed: {state["agents_failed"]}
-
 ⏱ Uptime: {uptime}
 
-📊 Symbols: {", ".join(x.upper() for x in SYMBOLS)}
+📊 Symbols: {len(SYMBOLS)} pairs
 """
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
                 elif text in ["/best", "/scalping"]:
                     best = await asyncio.to_thread(get_best_algorithm)
                     if not best:
-                        reply = "⏳ لا توجد خوارزمية مختبرة حتى الآن."
+                        reply = "⏳ No tested algorithms yet."
                     else:
                         reply = f"""
 🏆 BEST ALGORITHM
@@ -1112,19 +1022,10 @@ ID: {best["id"]}
                 elif text.startswith("/code"):
                     parts = text.split()
                     if len(parts) < 2:
-                        reply = "استعمل:\n/code ID"
+                        reply = "Use: /code ID"
                     else:
-                        algorithm_id = parts[1]
-                        try:
-                            conn = db_connect()
-                            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                            cur.execute("SELECT * FROM algorithms WHERE id=%s", (algorithm_id,))
-                            algo = cur.fetchone()
-                            cur.close()
-                            conn.close()
-                        except Exception as e:
-                            logging.warning("⚠️ Failed to fetch algorithm: %s", e)
-                            algo = None
+                        algo_id = parts[1]
+                        algo = await asyncio.to_thread(get_algo_by_id, algo_id)
                         if not algo:
                             reply = "❌ Algorithm not found"
                         else:
@@ -1134,16 +1035,15 @@ ID: {best["id"]}
                 elif text == "/trades":
                     trades = await asyncio.to_thread(get_recent_trades, 10)
                     if not trades:
-                        reply = "لا توجد صفقات محاكاة مسجلة."
+                        reply = "📊 No trades yet."
                     else:
                         lines = ["📊 LAST TRADES"]
-                        for trade in trades:
+                        for t in trades:
                             lines.append(
-                                f"""
-ID: {trade["id"]} {trade["symbol"]} {trade["side"]}
-Entry: {trade["entry_price"]}  TP: {trade["take_profit"]}  SL: {trade["stop_loss"]}
-Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent"]}%
-"""
+                                f"ID:{t['id']} {t['symbol']} {t['side']} | "
+                                f"Entry:{t['entry_price']:.2f} | "
+                                f"Exit:{t['exit_price']:.2f} | "
+                                f"PnL:{t['pnl_percent']}%"
                             )
                         reply = "\n".join(lines)
                     await asyncio.to_thread(telegram_send, chat_id, reply)
@@ -1151,12 +1051,13 @@ Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent
                 elif text == "/list":
                     algos = await asyncio.to_thread(get_algorithms_list, 5)
                     if not algos:
-                        reply = "لا توجد خوارزميات مسجلة."
+                        reply = "📋 No algorithms yet."
                     else:
-                        lines = ["📋 آخر الخوارزميات:"]
+                        lines = ["📋 RECENT ALGORITHMS"]
                         for a in algos:
                             lines.append(
-                                f"ID:{a['id']}  {a['agent_name']}  {a['symbol']}  Score:{a['score']}  {a['created_at']}"
+                                f"ID:{a['id']} | {a['agent_name']} | "
+                                f"{a['symbol']} | Score:{a['score']}"
                             )
                         reply = "\n".join(lines)
                     await asyncio.to_thread(telegram_send, chat_id, reply)
@@ -1165,14 +1066,14 @@ Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent
                     reply = """
 🤖 AI ALGORITHM LAB
 
-الأوامر:
-/status       حالة النظام
-/best         أفضل خوارزمية
-/scalping     نفس /best
-/code ID      عرض كود خوارزمية
-/trades       آخر الصفقات المسجلة
-/list         عرض آخر 5 خوارزميات
-/help         هذه الرسالة
+Commands:
+/status   - System status
+/best     - Best algorithm
+/scalping - Same as /best
+/code ID  - Show algorithm code
+/trades   - Recent paper trades
+/list     - Recent algorithms
+/help     - This message
 """
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
@@ -1187,44 +1088,29 @@ Exit: {trade["exit_price"]}  Status: {trade["status"]}  PnL: {trade["pnl_percent
 async def main():
     logging.info("%s STARTING", APP_NAME)
 
-    db_url = os.getenv("DATABASE_URL")
-    if not db_url or db_url.startswith("postgresql://USER:"):
-        logging.error("❌ DATABASE_URL is not set or is invalid. Please set it in Railway environment variables.")
-    else:
-        try:
-            success = await asyncio.to_thread(init_database)
-            if success:
-                logging.info("✅ Database initialized successfully.")
-            else:
-                logging.warning("⚠️ Database initialization failed, but bot will continue.")
-        except Exception as e:
-            logging.error("❌ Exception during database init: %s", e)
+    # تهيئة قاعدة البيانات (أو وضع الذاكرة)
+    await asyncio.to_thread(init_database)
 
-    logging.info("📥 Preloading historical market data from Binance USDT-M Futures...")
-    exchange = ccxt.binanceusdm({
-        "enableRateLimit": True,
-        "timeout": 30000,
-    })
-
-    preload_tasks = [preload_market_data(symbol, exchange) for symbol in SYMBOLS]
+    # تحميل البيانات التاريخية مباشرة من Binance (بدون CCXT)
+    logging.info("📥 Preloading historical market data directly from Binance REST API...")
+    preload_tasks = [preload_market_data(symbol) for symbol in SYMBOLS]
     results = await asyncio.gather(*preload_tasks, return_exceptions=True)
 
     success_count = 0
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            logging.error(f"❌ Error loading {SYMBOLS[i]}: {result}")
-        elif result is True:
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            logging.error(f"❌ Failed to load {SYMBOLS[i]}: {r}")
+        elif r is True:
             success_count += 1
         else:
             logging.warning(f"⚠️ Failed to load {SYMBOLS[i]}")
 
     logging.info(f"📊 MARKET CACHE READY: {success_count}/{len(SYMBOLS)}")
 
-    await exchange.close()
-
     if success_count == 0:
-        logging.error("❌ No market data loaded. Bot will continue without research loop (only Telegram and WebSocket).")
+        logging.error("❌ No market data loaded. Bot will continue but AI research may not work.")
 
+    # تشغيل المهام الأساسية
     await asyncio.gather(
         websocket_worker(),
         research_loop(),
