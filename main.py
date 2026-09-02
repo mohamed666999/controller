@@ -329,6 +329,18 @@ def save_algorithm(agent, symbol, hypothesis, code):
 def update_algorithm_score(algorithm_id, result):
     if not algorithm_id:
         return
+
+    total_trades = result.get("total_trades", 0)
+    win_rate = result.get("win_rate", 0)
+    profit_factor = result.get("profit_factor", 0)
+    max_drawdown = result.get("max_drawdown", 0)
+
+    # الشروط الدنيا لاعتماد الخوارزمية لتكون صالحة للتداول
+    if total_trades >= 30 and win_rate >= 50 and profit_factor >= 1.2 and max_drawdown <= 20:
+        status = "TESTED"
+    else:
+        status = "REJECTED"
+
     if MEMORY_MODE:
         for algo in memory_db["algorithms"]:
             if algo["id"] == algorithm_id:
@@ -337,12 +349,12 @@ def update_algorithm_score(algorithm_id, result):
                     "win_rate": result["win_rate"],
                     "profit_factor": result["profit_factor"],
                     "max_drawdown": result["max_drawdown"],
-                    "status": "TESTED"
+                    "status": status
                 })
         return
     _db_run(
-        "UPDATE algorithms SET score=%s, win_rate=%s, profit_factor=%s, max_drawdown=%s, status='TESTED' WHERE id=%s",
-        (result["score"], result["win_rate"], result["profit_factor"], result["max_drawdown"], algorithm_id),
+        "UPDATE algorithms SET score=%s, win_rate=%s, profit_factor=%s, max_drawdown=%s, status=%s WHERE id=%s",
+        (result["score"], result["win_rate"], result["profit_factor"], result["max_drawdown"], status, algorithm_id),
     )
 
 
@@ -442,7 +454,7 @@ def get_algo_by_id(algo_id):
 
 def fetch_klines_sync(symbol, retries=3):
     """جلب البيانات مباشرة من منصة بينانس مع إعادة محاولة وتسجيل مفصل."""
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval=1m&limit=200"
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval=1m&limit=1500"
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(url, timeout=15)
@@ -1092,7 +1104,12 @@ def backtest(symbol, code, algorithm_id=None):
     total = wins + losses
     win_rate = wins / total * 100 if total else 0
     profit_sum = sum(x for x in profits if x > 0)
-    profit_factor = profit_sum / loss_sum if loss_sum > 0 else profit_sum
+
+    if loss_sum == 0:
+        profit_factor = 9999.0 if profit_sum > 0 else 0.0
+    else:
+        profit_factor = profit_sum / loss_sum
+
     score = win_rate * 0.40 + min(profit_factor, 5) * 10 - max_drawdown * 100 * 0.30
 
     result = {
