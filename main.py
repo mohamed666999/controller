@@ -2,23 +2,67 @@
 # AI ALGORITHM LAB - main.py
 # Binance USDⓈ-M Futures + NVIDIA AI + MemoryDB/PostgreSQL + Telegram
 # ============================================================
+# Requirements:
+#   pip install requests numpy pandas websockets psycopg2-binary
+#   (psycopg2 / websockets are optional - the bot degrades gracefully)
+#
+# Fixes applied in this version:
+#  1. Removed stray "Pasted Content....txt" first line (it was a
+#     SyntaxError - the file could not even be parsed before).
+#  2. Sandboxed exec now provides full safe builtins (sum, sorted,
+#     zip, enumerate, list, dict, ...). Previously almost every
+#     AI-generated algorithm crashed with NameError -> score -100.
+#  3. paper_trades DB inserts: ms-epoch ints are now converted to
+#     timezone-aware datetimes (inserts silently failed on
+#     TIMESTAMPTZ columns before).
+#  4. research_cycle: backtest + DB writes now run through
+#     asyncio.to_thread so the event loop (WebSocket + Telegram)
+#     is never blocked during research.
+#  5. Telegram: HTTP timeout > long-poll timeout (no more borderline
+#     read timeouts), safe JSON handling, startup backlog drain,
+#     None-safe /trades and /best formatting.
+#  6. run_algorithm: correct signal alignment (no silent all-HOLD
+#     reindex), numeric coercion, 30s hard timeout vs infinite loops.
+#  7. validate_code: word-boundary regex scan (no more false
+#     positives like "cos." matching "os."), comments/strings
+#     stripped before scanning.
+#  8. parse_ai_output: tolerant of markdown ("**HYPOTHESIS**",
+#     "``` python", unclosed fences, multiple code fences).
+#  9. NVIDIA API call: robust parsing of error/empty responses.
+# 10. Optional dependency guards + preload rate limiting + secrets
+#     can be overridden via environment variables (defaults kept).
+# ============================================================
 
 import os
+import re
 import json
 import time
 import math
 import asyncio
 import logging
+import threading
 import traceback
+import builtins as _py_builtins
 from collections import deque
 from datetime import datetime, timezone
 
 import requests
 import numpy as np
 import pandas as pd
-import psycopg2
-import psycopg2.extras
-import websockets
+
+# --- optional dependencies (the bot must still boot without them) ---
+try:
+    import psycopg2
+    import psycopg2.extras
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
+
+try:
+    import websockets
+    WEBSOCKETS_AVAILABLE = True
+except ImportError:
+    WEBSOCKETS_AVAILABLE = False
 
 # ============================================================
 # CONFIG
@@ -35,11 +79,15 @@ APP_NAME = "AI ALGORITHM LAB"
 # Set DATABASE_URL in Railway environment variables:
 #   postgresql://user:pass@host:port/dbname
 # If not set, bot runs in MEMORY_MODE (data lost on restart).
-# Also, ensure only one replica (scale=1) to avoid Telegram 409 conflict.
 # ---------------------------------------------------
-TELEGRAM_TOKEN = "8688907472:AAHOsxXowXD4HD2GiV5CgPYLHLKx5HJLbi8"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8688907472:AAHOsxXowXD4HD2GiV5CgPYLHLKx5HJLbi8")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://USER:PASSWORD@HOST:PORT/DATABASE")
-MEMORY_MODE = (not DATABASE_URL) or ("HOST:PORT" in DATABASE_URL)
+
+MEMORY_MODE = (
+    (not DATABASE_URL)
+    or ("HOST:PORT" in DATABASE_URL)
+    or (not PSYCOPG2_AVAILABLE)
+)
 
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
@@ -52,7 +100,7 @@ AGENTS = [
         "id": 1,
         "name": "DEEPSEEK_1",
         "model": "deepseek-ai/deepseek-v4-flash-0731",
-        "api_key": "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",
+        "api_key": os.getenv("NVIDIA_API_KEY_1", "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"),
         "temperature": 1.0,
         "reasoning_effort": "high",
         "max_tokens": 16384,
@@ -63,7 +111,7 @@ AGENTS = [
         "id": 2,
         "name": "DEEPSEEK_2",
         "model": "deepseek-ai/deepseek-v4-flash-0731",
-        "api_key": "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",
+        "api_key": os.getenv("NVIDIA_API_KEY_2", "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"),
         "temperature": 1.0,
         "reasoning_effort": "high",
         "max_tokens": 16384,
@@ -74,7 +122,7 @@ AGENTS = [
         "id": 3,
         "name": "KIMI",
         "model": "moonshotai/kimi-k3",
-        "api_key": "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",
+        "api_key": os.getenv("NVIDIA_API_KEY_3", "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"),
         "temperature": 1.0,
         "reasoning_effort": "max",
         "max_tokens": 16384,
@@ -85,7 +133,7 @@ AGENTS = [
         "id": 4,
         "name": "LLAMA",
         "model": "meta/llama-3.2-90b-vision-instruct",
-        "api_key": "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",
+        "api_key": os.getenv("NVIDIA_API_KEY_4", "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"),
         "temperature": 1.0,
         "reasoning_effort": None,
         "max_tokens": 16384,
@@ -149,79 +197,105 @@ def db_connect():
         return None
     return psycopg2.connect(DATABASE_URL)
 
-def init_database():
-    if MEMORY_MODE:
-        logging.info("🟡 Running in MEMORY MODE (No Database configured - Everything works fine locally)")
-        return True
+
+def _db_run(sql, params=None, fetch="none"):
+    """Execute one SQL statement safely.
+
+    fetch: "none" (write, returns True) | "one" (fetchone) | "all" (fetchall).
+    Returns None on any failure so callers can degrade gracefully.
+    """
+    if MEMORY_MODE or not PSYCOPG2_AVAILABLE:
+        return None
+    conn = None
     try:
         conn = db_connect()
-        cur = conn.cursor()
-        sql = """
-        CREATE TABLE IF NOT EXISTS algorithms (
-            id BIGSERIAL PRIMARY KEY,
-            lab TEXT NOT NULL,
-            symbol TEXT,
-            agent_id INTEGER,
-            agent_name TEXT,
-            model_name TEXT,
-            hypothesis TEXT,
-            code TEXT NOT NULL,
-            score DOUBLE PRECISION DEFAULT 0,
-            win_rate DOUBLE PRECISION DEFAULT 0,
-            profit_factor DOUBLE PRECISION DEFAULT 0,
-            max_drawdown DOUBLE PRECISION DEFAULT 0,
-            status TEXT DEFAULT 'RESEARCH',
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS agent_logs (
-            id BIGSERIAL PRIMARY KEY,
-            agent_id INTEGER,
-            agent_name TEXT,
-            status TEXT,
-            message TEXT,
-            duration_ms BIGINT,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS paper_trades (
-            id BIGSERIAL PRIMARY KEY,
-            algorithm_id BIGINT REFERENCES algorithms(id),
-            symbol TEXT,
-            side TEXT,
-            entry_price DOUBLE PRECISION,
-            take_profit DOUBLE PRECISION,
-            stop_loss DOUBLE PRECISION,
-            exit_price DOUBLE PRECISION,
-            status TEXT DEFAULT 'OPEN',
-            pnl_percent DOUBLE PRECISION DEFAULT 0,
-            opened_at TIMESTAMPTZ DEFAULT NOW(),
-            closed_at TIMESTAMPTZ
-        );
-        """
-        cur.execute(sql)
-        conn.commit()
-        cur.close()
-        conn.close()
-        logging.info("✅ PostgreSQL tables created successfully")
-        return True
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = None
+            if fetch == "one":
+                rows = cur.fetchone()
+            elif fetch == "all":
+                rows = cur.fetchall()
+            conn.commit()
+            return rows if rows is not None else True
     except Exception as e:
-        logging.error("❌ init_database FAILED: %s", e)
+        logging.error("❌ DB operation failed: %s | SQL: %s", e, str(sql)[:200])
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def init_database():
+    if MEMORY_MODE:
+        reason = "psycopg2 not installed" if not PSYCOPG2_AVAILABLE else "no DATABASE_URL configured"
+        logging.info("🟡 Running in MEMORY MODE (%s - Everything works fine locally)", reason)
+        return True
+    sql = """
+    CREATE TABLE IF NOT EXISTS algorithms (
+        id BIGSERIAL PRIMARY KEY,
+        lab TEXT NOT NULL,
+        symbol TEXT,
+        agent_id INTEGER,
+        agent_name TEXT,
+        model_name TEXT,
+        hypothesis TEXT,
+        code TEXT NOT NULL,
+        score DOUBLE PRECISION DEFAULT 0,
+        win_rate DOUBLE PRECISION DEFAULT 0,
+        profit_factor DOUBLE PRECISION DEFAULT 0,
+        max_drawdown DOUBLE PRECISION DEFAULT 0,
+        status TEXT DEFAULT 'RESEARCH',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS agent_logs (
+        id BIGSERIAL PRIMARY KEY,
+        agent_id INTEGER,
+        agent_name TEXT,
+        status TEXT,
+        message TEXT,
+        duration_ms BIGINT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS paper_trades (
+        id BIGSERIAL PRIMARY KEY,
+        algorithm_id BIGINT REFERENCES algorithms(id),
+        symbol TEXT,
+        side TEXT,
+        entry_price DOUBLE PRECISION,
+        take_profit DOUBLE PRECISION,
+        stop_loss DOUBLE PRECISION,
+        exit_price DOUBLE PRECISION,
+        status TEXT DEFAULT 'OPEN',
+        pnl_percent DOUBLE PRECISION DEFAULT 0,
+        opened_at TIMESTAMPTZ DEFAULT NOW(),
+        closed_at TIMESTAMPTZ
+    );
+    """
+    result = _db_run(sql)
+    if result is None:
+        logging.error("❌ init_database FAILED")
         return False
+    logging.info("✅ PostgreSQL tables created successfully")
+    return True
+
 
 def log_agent(agent, status, message, duration_ms=0):
     if MEMORY_MODE:
         return
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO agent_logs (agent_id, agent_name, status, message, duration_ms) VALUES (%s, %s, %s, %s, %s)",
-            (agent["id"], agent["name"], status, str(message)[:5000], duration_ms)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception:
-        pass
+    _db_run(
+        "INSERT INTO agent_logs (agent_id, agent_name, status, message, duration_ms) VALUES (%s, %s, %s, %s, %s)",
+        (agent["id"], agent["name"], status, str(message)[:5000], duration_ms),
+    )
+
 
 def save_algorithm(agent, symbol, hypothesis, code):
     if MEMORY_MODE:
@@ -241,20 +315,16 @@ def save_algorithm(agent, symbol, hypothesis, code):
             "created_at": str(datetime.now(timezone.utc))
         })
         return algo_id
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO algorithms (lab, symbol, agent_id, agent_name, model_name, hypothesis, code) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            ("scalping", symbol, agent["id"], agent["name"], agent["model"], hypothesis, code)
-        )
-        algorithm_id = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
-        conn.close()
-        return algorithm_id
-    except Exception:
+    row = _db_run(
+        "INSERT INTO algorithms (lab, symbol, agent_id, agent_name, model_name, hypothesis, code) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        ("scalping", symbol, agent["id"], agent["name"], agent["model"], hypothesis, code),
+        fetch="one",
+    )
+    if row is None:
+        logging.error("❌ save_algorithm FAILED for agent %s", agent["name"])
         return None
+    return row["id"]
+
 
 def update_algorithm_score(algorithm_id, result):
     if not algorithm_id:
@@ -270,18 +340,11 @@ def update_algorithm_score(algorithm_id, result):
                     "status": "TESTED"
                 })
         return
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE algorithms SET score=%s, win_rate=%s, profit_factor=%s, max_drawdown=%s, status='TESTED' WHERE id=%s",
-            (result["score"], result["win_rate"], result["profit_factor"], result["max_drawdown"], algorithm_id)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception:
-        pass
+    _db_run(
+        "UPDATE algorithms SET score=%s, win_rate=%s, profit_factor=%s, max_drawdown=%s, status='TESTED' WHERE id=%s",
+        (result["score"], result["win_rate"], result["profit_factor"], result["max_drawdown"], algorithm_id),
+    )
+
 
 def save_trades_batch(algorithm_id, trades):
     if not trades or not algorithm_id:
@@ -292,22 +355,42 @@ def save_trades_batch(algorithm_id, trades):
             t["algorithm_id"] = algorithm_id
             memory_db["trades"].append(t)
         return
+    conn = None
     try:
         conn = db_connect()
-        cur = conn.cursor()
-        for trade in trades:
-            cur.execute(
-                "INSERT INTO paper_trades (algorithm_id, symbol, side, entry_price, take_profit, stop_loss, exit_price, status, pnl_percent, opened_at, closed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (algorithm_id, trade["symbol"], trade["side"], trade["entry_price"],
-                 trade["take_profit"], trade["stop_loss"], trade["exit_price"],
-                 trade["status"], trade["pnl_percent"],
-                 trade["opened_at"], trade["closed_at"])
-            )
+        with conn.cursor() as cur:
+            for trade in trades:
+                cur.execute(
+                    "INSERT INTO paper_trades (algorithm_id, symbol, side, entry_price, take_profit, stop_loss, exit_price, status, pnl_percent, opened_at, closed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        algorithm_id,
+                        trade["symbol"],
+                        trade["side"],
+                        trade["entry_price"],
+                        trade["take_profit"],
+                        trade["stop_loss"],
+                        trade["exit_price"],
+                        trade["status"],
+                        trade["pnl_percent"],
+                        trade["opened_at"],
+                        trade["closed_at"],
+                    ),
+                )
         conn.commit()
-        cur.close()
-        conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.error("❌ save_trades_batch FAILED: %s", e)
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
 
 def get_best_algorithm():
     if MEMORY_MODE:
@@ -315,44 +398,34 @@ def get_best_algorithm():
         if not tested:
             return None
         return sorted(tested, key=lambda x: x["score"], reverse=True)[0]
-    try:
-        conn = db_connect()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM algorithms WHERE status='TESTED' ORDER BY score DESC LIMIT 1")
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        return result
-    except Exception:
-        return None
+    row = _db_run(
+        "SELECT * FROM algorithms WHERE status='TESTED' ORDER BY score DESC LIMIT 1",
+        fetch="one",
+    )
+    return row
+
 
 def get_recent_trades(limit=10):
     if MEMORY_MODE:
         return list(reversed(memory_db["trades"]))[:limit]
-    try:
-        conn = db_connect()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT %s", (limit,))
-        result = cur.fetchall()
-        cur.close()
-        conn.close()
-        return result
-    except Exception:
-        return []
+    rows = _db_run(
+        "SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT %s",
+        (limit,),
+        fetch="all",
+    )
+    return rows or []
+
 
 def get_algorithms_list(limit=5):
     if MEMORY_MODE:
         return list(reversed(memory_db["algorithms"]))[:limit]
-    try:
-        conn = db_connect()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT id, agent_name, symbol, score, created_at FROM algorithms ORDER BY created_at DESC LIMIT %s", (limit,))
-        result = cur.fetchall()
-        cur.close()
-        conn.close()
-        return result
-    except Exception:
-        return []
+    rows = _db_run(
+        "SELECT id, agent_name, symbol, score, created_at FROM algorithms ORDER BY created_at DESC LIMIT %s",
+        (limit,),
+        fetch="all",
+    )
+    return rows or []
+
 
 def get_algo_by_id(algo_id):
     if MEMORY_MODE:
@@ -360,46 +433,41 @@ def get_algo_by_id(algo_id):
             if str(a["id"]) == str(algo_id):
                 return a
         return None
-    try:
-        conn = db_connect()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM algorithms WHERE id=%s", (algo_id,))
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        return result
-    except Exception:
-        return None
+    row = _db_run("SELECT * FROM algorithms WHERE id=%s", (algo_id,), fetch="one")
+    return row
 
 # ============================================================
-# DIRECT BINANCE REST (Improved logging & retries)
+# DIRECT BINANCE REST (with improved logging & retries)
 # ============================================================
 
 def fetch_klines_sync(symbol, retries=3):
-    """جلب البيانات مع logging مفصل وإعادة محاولة"""
+    """جلب البيانات مباشرة من منصة بينانس مع إعادة محاولة وتسجيل مفصل."""
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval=1m&limit=200"
     for attempt in range(1, retries + 1):
         try:
-            logging.info(f"🔄 Fetching {symbol} (attempt {attempt})")
             resp = requests.get(url, timeout=15)
             if resp.status_code != 200:
                 logging.error(f"❌ Binance HTTP {resp.status_code} for {symbol}: {resp.text[:200]}")
                 if resp.status_code == 451:
-                    logging.error("🚫 Binance 451: Unavailable for legal reasons (likely US region). Please deploy in EU region or use a proxy.")
+                    logging.error("🚫 Binance 451: Unavailable for legal reasons (likely US region). Consider using a VPN/proxy or deploy in EU region.")
                 raise requests.exceptions.HTTPError(f"HTTP {resp.status_code}")
             data = resp.json()
-            logging.info(f"✅ {symbol}: received {len(data)} candles")
+            if isinstance(data, dict):
+                # Binance returned a JSON error object instead of kline rows
+                raise ValueError(f"Binance error payload for {symbol}: {str(data)[:200]}")
+            if not data:
+                raise ValueError(f"Binance returned empty klines for {symbol}")
             return data
         except Exception as e:
             logging.warning(f"⚠️ Attempt {attempt}/{retries} failed for {symbol}: {e}")
             if attempt < retries:
-                wait = 2 ** attempt  # exponential backoff: 2, 4, 8 seconds
-                logging.info(f"⏳ Retrying {symbol} in {wait}s...")
-                time.sleep(wait)
+                time.sleep(2 ** attempt)  # exponential backoff
     raise Exception(f"Failed to fetch {symbol} after {retries} attempts")
+
 
 async def preload_market_data(symbol):
     try:
+        logging.info(f"📥 Fetching historical data: {symbol.upper()}")
         data = await asyncio.to_thread(fetch_klines_sync, symbol)
         candles = []
         for row in data:
@@ -411,13 +479,16 @@ async def preload_market_data(symbol):
                 "close": float(row[4]),
                 "volume": float(row[5]),
             })
+        if not candles:
+            logging.error(f"❌ Empty klines payload for {symbol}")
+            return False
         market_cache["candles_1m"][symbol].clear()
         market_cache["candles_1m"][symbol].extend(candles)
         market_cache["prices"][symbol] = candles[-1]["close"]
-        logging.info(f"✅ {symbol}: loaded {len(candles)} candles into cache")
+        logging.info(f"✅ {symbol}: loaded {len(candles)} candles")
         return True
     except Exception as e:
-        logging.error(f"❌ Failed to preload {symbol}: {e}")
+        logging.error(f"❌ Failed to fetch {symbol}: {e}")
         return False
 
 # ============================================================
@@ -432,7 +503,11 @@ def build_ws_url():
         streams.append(f"{s}@kline_1m")
     return BINANCE_WS + "/".join(streams)
 
+
 async def websocket_worker():
+    if not WEBSOCKETS_AVAILABLE:
+        logging.error("❌ 'websockets' package not installed - live market stream disabled (install: pip install websockets)")
+        return
     url = build_ws_url()
     while True:
         try:
@@ -440,11 +515,16 @@ async def websocket_worker():
             async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2**23) as ws:
                 logging.info("BINANCE WEBSOCKET CONNECTED")
                 async for raw in ws:
-                    message = json.loads(raw)
+                    try:
+                        message = json.loads(raw)
+                    except (ValueError, TypeError):
+                        continue
                     stream = message.get("stream", "")
                     data = message.get("data", {})
-                    symbol = data.get("s", "").lower()
-                    if not symbol:
+                    if not isinstance(data, dict):
+                        continue
+                    symbol = str(data.get("s", "")).lower()
+                    if not symbol or symbol not in market_cache["prices"]:
                         continue
 
                     if "@trade" in stream:
@@ -485,7 +565,7 @@ async def websocket_worker():
 def calculate_features(symbol):
     candles = list(market_cache["candles_1m"][symbol])
     if len(candles) < 20:
-        logging.warning(f"⚠️ {symbol}: only {len(candles)} candles (< 20), skipping")
+        logging.warning(f"⚠️ {symbol}: only {len(candles)} candles (< 20), not enough data")
         return None
 
     trades = list(market_cache["trades"][symbol])
@@ -493,6 +573,8 @@ def calculate_features(symbol):
 
     df = pd.DataFrame(candles)
     closes = df["close"].values
+    if np.any(closes <= 0):
+        return None
     returns = np.diff(np.log(closes))
 
     price_velocity = float(np.mean(returns[-10:])) if len(returns) >= 10 else 0
@@ -618,10 +700,12 @@ CODE:
 ```python
 def generate_signal(df):
     ...
+```
 
 MARKET DATA SNAPSHOT:
 
 {json.dumps(features, indent=2)[:12000]} """
+
 
 def call_agent_sync(agent, features):
     prompt = build_prompt(features)
@@ -641,9 +725,25 @@ def call_agent_sync(agent, features):
         payload["reasoning_effort"] = agent["reasoning_effort"]
 
     response = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=agent.get("request_timeout", 110))
-    response.raise_for_status()
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
+    if response.status_code != 200:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
+    try:
+        data = response.json()
+    except ValueError:
+        raise RuntimeError(f"Non-JSON response from NVIDIA API: {response.text[:300]}")
+
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError(f"Empty 'choices' in NVIDIA response: {str(data)[:200]}")
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+    if not content or not str(content).strip():
+        # Some reasoning models put the answer in a separate field
+        content = message.get("reasoning_content") or ""
+    if not content or not str(content).strip():
+        raise ValueError("NVIDIA returned empty content")
+    return content
+
 
 async def run_agent_with_retries(agent, features):
     agent_name = agent["name"]
@@ -654,13 +754,15 @@ async def run_agent_with_retries(agent, features):
     for attempt in range(1, max_attempts + 1):
         logging.info(f"🤖 {agent_name} | Attempt {attempt}/{max_attempts}")
         try:
+            # NOTE: on timeout the worker thread keeps running until the HTTP
+            # request finishes on its own; this is acceptable and bounded.
             result = await asyncio.wait_for(
                 asyncio.to_thread(call_agent_sync, agent, features),
                 timeout=timeout
             )
             if result and len(str(result).strip()) > 50:
                 duration = int((time.time() - start_total) * 1000)
-                log_agent(agent, "SUCCESS", f"Attempt {attempt} succeeded", duration)
+                await asyncio.to_thread(log_agent, agent, "SUCCESS", f"Attempt {attempt} succeeded", duration)
                 state["agents_ok"] += 1
                 logging.info(f"✅ {agent_name} succeeded on attempt {attempt}")
                 return {
@@ -682,7 +784,7 @@ async def run_agent_with_retries(agent, features):
             await asyncio.sleep(wait)
 
     duration = int((time.time() - start_total) * 1000)
-    log_agent(agent, "FAILED", f"All {max_attempts} attempts failed", duration)
+    await asyncio.to_thread(log_agent, agent, "FAILED", f"All {max_attempts} attempts failed", duration)
     state["agents_failed"] += 1
     logging.error(f"❌ {agent_name} failed after {max_attempts} attempts")
     return {
@@ -692,68 +794,186 @@ async def run_agent_with_retries(agent, features):
         "content": None,
     }
 
+# ============================================================
+# PARSE & VALIDATE AI OUTPUT
+# ============================================================
+
 def parse_ai_output(text):
+    """Extract (hypothesis, code). Tolerant to markdown formatting."""
     if not text:
         return None, None
+    cleaned = str(text).replace("**", "")
+
     hypothesis = ""
-    if "HYPOTHESIS:" in text:
-        part = text.split("HYPOTHESIS:", 1)[1]
-        if "CODE:" in part:
-            hypothesis = part.split("CODE:", 1)[0].strip()
-    code = None
-    if "```python" in text:
-        code = text.split("```python", 1)[1]
+    m_hyp = re.search(r"HYPOTHESIS\s*:", cleaned, re.IGNORECASE)
+    if m_hyp:
+        rest = cleaned[m_hyp.end():]
+        m_code = re.search(r"CODE\s*:", rest, re.IGNORECASE)
+        if m_code:
+            hypothesis = rest[:m_code.start()].strip()
+        else:
+            hypothesis = rest.strip()
+
+    code = _extract_code_block(cleaned)
+    return hypothesis, code
+
+
+def _extract_code_block(text):
+    """Return the generate_signal python code from a model answer."""
+    # 1) Prefer fenced blocks (```python / ```py / plain ```)
+    for m in re.finditer(r"```(?:python|py)?[ \t]*\r?\n", text, re.IGNORECASE):
+        rest = text[m.end():]
+        if "```" in rest:
+            block = rest.split("```", 1)[0]
+        else:
+            block = rest  # response was truncated before the closing fence
+        block = block.strip()
+        if "def generate_signal" in block:
+            return block
+    # 2) Fallback: raw function in the text
+    idx = text.find("def generate_signal")
+    if idx != -1:
+        code = text[idx:]
         if "```" in code:
             code = code.split("```", 1)[0]
-        code = code.strip()
-    elif "def generate_signal" in text:
-        index = text.find("def generate_signal")
-        code = text[index:].strip()
-    return hypothesis, code
+        return code.strip()
+    return None
+
+
+_FORBIDDEN_CODE_PATTERNS = [
+    r"\bimport\b",
+    r"\bfrom\s+[\w.]+\s+import\b",
+    r"__import__",
+    r"\bopen\s*\(",
+    r"\bexec\s*\(",
+    r"\beval\s*\(",
+    r"\bcompile\s*\(",
+    r"\bglobals\s*\(",
+    r"\blocals\s*\(",
+    r"\bvars\s*\(",
+    r"\bsubprocess\b",
+    r"\brequests\b",
+    r"\burllib\b",
+    r"\bsocket\b",
+    r"\bos\s*\.",
+    r"\bsys\s*\.",
+    r"\bpathlib\b",
+    r"\bshutil\b",
+]
+
 
 def validate_code(code):
     if not code:
         return False, "No code"
-    forbidden = [
-        "import ", "__import__", "open(", "exec(", "eval(",
-        "subprocess", "requests", "socket", "os.", "sys.",
-        "pathlib", "shutil"
-    ]
-    lowered = code.lower()
-    for word in forbidden:
-        if word in lowered:
-            return False, f"Forbidden: {word}"
     if "def generate_signal" not in code:
         return False, "generate_signal missing"
+    # Strip comments and string literals before scanning, so words like
+    # "requests" or "os." inside comments/docstrings cannot cause false
+    # rejections (word-boundary regex also prevents "cos." -> "os.").
+    scanned = re.sub(r"#.*", "", code)
+    scanned = re.sub(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", "", scanned)
+    for pattern in _FORBIDDEN_CODE_PATTERNS:
+        if re.search(pattern, scanned):
+            return False, f"Forbidden pattern: {pattern}"
     try:
         compile(code, "<ai_algorithm>", "exec")
         return True, "OK"
+    except SyntaxError as e:
+        return False, f"SyntaxError: {e}"
     except Exception as e:
         return False, str(e)
 
 # ============================================================
-# RUN GENERATED INDICATOR & BACKTEST
+# SANDBOX FOR GENERATED INDICATORS
 # ============================================================
+
+# Full builtins minus the dangerous ones. The previous tiny whitelist
+# (abs/min/max/len/range/float/int) made almost every AI algorithm
+# crash with NameError (sum, sorted, zip, enumerate, list...).
+_BUILTIN_BLACKLIST = {
+    "__import__", "open", "exec", "eval", "compile", "input", "breakpoint",
+    "exit", "quit", "help", "license", "credits", "globals", "locals", "vars",
+    "setattr", "delattr",
+}
+
+SAFE_BUILTINS = {
+    name: obj
+    for name, obj in vars(_py_builtins).items()
+    if name not in _BUILTIN_BLACKLIST
+}
+
+
+def _run_with_timeout(fn, args, timeout_s):
+    """Run fn(*args) in a daemon thread with a hard timeout."""
+    box = {}
+
+    def _target():
+        try:
+            box["result"] = fn(*args)
+        except BaseException as e:  # propagated to the caller below
+            box["error"] = e
+
+    worker = threading.Thread(target=_target, daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    if worker.is_alive():
+        raise TimeoutError(f"Algorithm execution exceeded {timeout_s}s (possible infinite loop)")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def _normalize_signals(signals, df):
+    """Coerce the indicator output into a clean numeric Series aligned to df."""
+    if isinstance(signals, pd.DataFrame):
+        if signals.shape[1] != 1:
+            raise ValueError("generate_signal must return a single column")
+        signals = signals.iloc[:, 0]
+    if isinstance(signals, pd.Series):
+        raw = signals.to_numpy()
+    elif isinstance(signals, (list, tuple, np.ndarray)):
+        raw = np.asarray(signals)
+    else:
+        raise TypeError("generate_signal must return a Series / list / array")
+    if len(raw) != len(df):
+        raise ValueError(f"generate_signal returned {len(raw)} values, expected {len(df)}")
+    numeric = pd.to_numeric(pd.Series(raw), errors="coerce")
+    numeric = numeric.set_axis(df.index)
+    return numeric.clip(-1, 1).fillna(0).astype(float)
+
 
 def run_algorithm(code, df):
     safe_globals = {
         "np": np,
         "pd": pd,
         "math": math,
-        "__builtins__": {
-            "abs": abs, "min": min, "max": max,
-            "len": len, "range": range,
-            "float": float, "int": int,
-        },
+        "__builtins__": SAFE_BUILTINS,
+        "__name__": "ai_algorithm",
     }
     local_vars = {}
-    exec(code, safe_globals, local_vars)
+    exec(code, safe_globals, local_vars)  # sandboxed + pre-validated code
     fn = local_vars.get("generate_signal")
-    if not fn:
-        raise ValueError("generate_signal missing")
-    signals = fn(df.copy())
-    signals = pd.Series(signals, index=df.index)
-    return signals.clip(-1, 1).fillna(0)
+    if not callable(fn):
+        raise ValueError("generate_signal missing or not callable")
+    signals = _run_with_timeout(fn, (df.copy(),), 30)
+    return _normalize_signals(signals, df)
+
+# ============================================================
+# BACKTEST
+# ============================================================
+
+def _ms_to_dt(ms):
+    """Convert Binance open_time (ms epoch) to a timezone-aware datetime.
+
+    This is required for the PostgreSQL TIMESTAMPTZ columns - raw ints
+    made every paper_trades INSERT fail silently before.
+    """
+    if ms is None:
+        return None
+    if isinstance(ms, (int, float)):
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    return ms
+
 
 def backtest(symbol, code, algorithm_id=None):
     candles = list(market_cache["candles_1m"][symbol])
@@ -812,7 +1032,7 @@ def backtest(symbol, code, algorithm_id=None):
                     "entry": price,
                     "tp": price * (1 + TP),
                     "sl": price * (1 - SL),
-                    "opened_at": df["open_time"].iloc[i],
+                    "opened_at": _ms_to_dt(df["open_time"].iloc[i]),
                 }
             elif signal == -1:
                 position = {
@@ -820,7 +1040,7 @@ def backtest(symbol, code, algorithm_id=None):
                     "entry": price,
                     "tp": price * (1 - TP),
                     "sl": price * (1 + SL),
-                    "opened_at": df["open_time"].iloc[i],
+                    "opened_at": _ms_to_dt(df["open_time"].iloc[i]),
                 }
         else:
             exit_price = None
@@ -864,7 +1084,7 @@ def backtest(symbol, code, algorithm_id=None):
                     "status": "CLOSED",
                     "pnl_percent": round(pnl_pct * 100, 4),
                     "opened_at": position["opened_at"],
-                    "closed_at": df["open_time"].iloc[i],
+                    "closed_at": _ms_to_dt(df["open_time"].iloc[i]),
                 }
                 trades_record.append(trade_record)
                 position = None
@@ -902,7 +1122,8 @@ async def research_cycle():
     logging.info(f"🔬 CYCLE {cycle_num} START")
 
     for symbol in SYMBOLS:
-        features = calculate_features(symbol)
+        # run in a worker thread so pandas never blocks the event loop
+        features = await asyncio.to_thread(calculate_features, symbol)
         if not features:
             continue
 
@@ -912,6 +1133,8 @@ async def research_cycle():
             for agent in AGENTS
             if not agent["api_key"].startswith("PUT_")
         ]
+        if not tasks:
+            continue
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in results:
@@ -925,15 +1148,16 @@ async def research_cycle():
             hypothesis, code = parse_ai_output(result["content"])
             valid, reason = validate_code(code)
             if not valid:
-                log_agent(agent, "INVALID_CODE", reason)
+                await asyncio.to_thread(log_agent, agent, "INVALID_CODE", reason)
                 continue
 
-            algorithm_id = save_algorithm(agent, symbol.upper(), hypothesis, code)
+            algorithm_id = await asyncio.to_thread(save_algorithm, agent, symbol.upper(), hypothesis, code)
             if algorithm_id is None:
                 continue
 
-            bt_result = backtest(symbol, code, algorithm_id=algorithm_id)
-            update_algorithm_score(algorithm_id, bt_result)
+            # backtest (exec + pandas + DB writes) runs off the event loop
+            bt_result = await asyncio.to_thread(backtest, symbol, code, algorithm_id)
+            await asyncio.to_thread(update_algorithm_score, algorithm_id, bt_result)
 
             logging.info(
                 "🎯 AI=%s | SYMBOL=%s | SCORE=%s | TRADES=%s",
@@ -942,6 +1166,7 @@ async def research_cycle():
             )
 
     logging.info(f"🔬 CYCLE {cycle_num} COMPLETE")
+
 
 async def research_loop():
     while True:
@@ -958,47 +1183,78 @@ async def research_loop():
 
 TELEGRAM_OFFSET = 0
 
-def telegram_request(method, payload=None):
+
+def telegram_request(method, payload=None, http_timeout=45):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-    response = requests.post(url, json=payload or {}, timeout=30)
-    return response.json()
+    try:
+        response = requests.post(url, json=payload or {}, timeout=http_timeout)
+        return response.json()
+    except Exception as e:
+        logging.error("❌ telegram_request %s failed: %s", method, e)
+        return {"ok": False, "error_code": -1, "description": str(e)}
+
 
 def telegram_send(chat_id, text):
-    return telegram_request("sendMessage", {"chat_id": chat_id, "text": text[:4000]})
+    return telegram_request("sendMessage", {"chat_id": chat_id, "text": str(text)[:4000]})
+
+
+def telegram_skip_backlog():
+    """On startup, discard queued old updates so restarts don't replay
+    every old command (which previously re-executed on each restart)."""
+    global TELEGRAM_OFFSET
+    data = telegram_request("getUpdates", {"offset": -1, "limit": 1})
+    if data and data.get("ok"):
+        result = data.get("result", [])
+        if result:
+            TELEGRAM_OFFSET = result[-1]["update_id"] + 1
+            logging.info("↪️ Telegram backlog skipped (old commands will not be replayed)")
+
+
+def _fmt_price(value):
+    if value is None:
+        return "OPEN"
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return "?"
+
 
 async def telegram_loop():
     global TELEGRAM_OFFSET
+    await asyncio.to_thread(telegram_skip_backlog)
     while True:
         try:
+            # NOTE: HTTP timeout (45s) must be strictly greater than the
+            # long-poll timeout (25s), otherwise borderline read timeouts.
             data = await asyncio.to_thread(
                 telegram_request,
                 "getUpdates",
-                {"offset": TELEGRAM_OFFSET, "timeout": 30}
+                {"offset": TELEGRAM_OFFSET, "timeout": 25},
+                45,
             )
 
-            # Handle conflict (409) – multiple instances using same token
+            # Handle conflict (409) - multiple instances using same token
             if data and not data.get("ok"):
                 if data.get("error_code") == 409:
-                    logging.error("🚨 TELEGRAM CONFLICT: Another instance is using this bot token. Ensure only one replica is running (scale=1).")
+                    logging.error("🚨 TELEGRAM CONFLICT: Another instance is using this bot token. Ensure only one replica is running.")
                     await asyncio.sleep(30)
                     continue
-                else:
-                    logging.error(f"❌ Telegram API error: {data}")
-                    await asyncio.sleep(5)
-                    continue
+                logging.error(f"❌ Telegram API error: {data}")
+                await asyncio.sleep(5)
+                continue
 
-            for update in data.get("result", []):
+            for update in (data or {}).get("result", []):
                 TELEGRAM_OFFSET = update["update_id"] + 1
-                message = update.get("message", {})
-                text = message.get("text", "")
-                chat = message.get("chat", {})
+                message = update.get("message", {}) or {}
+                text = message.get("text") or ""
+                chat = message.get("chat", {}) or {}
                 chat_id = chat.get("id")
                 if not chat_id:
                     continue
 
                 if text == "/status":
                     uptime = datetime.now(timezone.utc) - state["started_at"]
-                    db_mode = "🟢 Memory DB" if MEMORY_MODE else "🟢 PostgreSQL"
+                    db_mode = "🟡 Memory DB" if MEMORY_MODE else "🟢 PostgreSQL"
                     reply = f"""
 🤖 {APP_NAME}
 
@@ -1018,20 +1274,24 @@ async def telegram_loop():
                     if not best:
                         reply = "⏳ No tested algorithms yet."
                     else:
+                        win_rate = float(best.get("win_rate") or 0)
+                        profit_factor = float(best.get("profit_factor") or 0)
+                        max_drawdown = float(best.get("max_drawdown") or 0)
+                        hypothesis = str(best.get("hypothesis") or "")[:1200]
                         reply = f"""
 🏆 BEST ALGORITHM
 
-ID: {best["id"]}
-🤖 AI: {best["agent_name"]}
-🧠 Model: {best["model_name"]}
-📊 Symbol: {best["symbol"]}
-⭐ Score: {best["score"]}
-🎯 Win Rate: {best["win_rate"]:.2f}%
-📈 Profit Factor: {best["profit_factor"]:.3f}
-📉 Max Drawdown: {best["max_drawdown"]:.2f}%
+ID: {best.get("id")}
+🤖 AI: {best.get("agent_name") or "-"}
+🧠 Model: {best.get("model_name") or "-"}
+📊 Symbol: {best.get("symbol") or "-"}
+⭐ Score: {best.get("score") or 0}
+🎯 Win Rate: {win_rate:.2f}%
+📈 Profit Factor: {profit_factor:.3f}
+📉 Max Drawdown: {max_drawdown:.2f}%
 
 📝 Hypothesis:
-{best["hypothesis"][:1200]}
+{hypothesis}
 """
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
@@ -1045,7 +1305,7 @@ ID: {best["id"]}
                         if not algo:
                             reply = "❌ Algorithm not found"
                         else:
-                            reply = f"💻 ALGORITHM #{algo['id']}\n\n{algo['code']}"
+                            reply = f"💻 ALGORITHM #{algo.get('id')}\n\n{algo.get('code') or ''}"
                     await asyncio.to_thread(telegram_send, chat_id, reply)
 
                 elif text == "/trades":
@@ -1055,11 +1315,16 @@ ID: {best["id"]}
                     else:
                         lines = ["📊 LAST TRADES"]
                         for t in trades:
+                            pnl = t.get("pnl_percent")
+                            try:
+                                pnl_str = f"{float(pnl):.2f}" if pnl is not None else "-"
+                            except (TypeError, ValueError):
+                                pnl_str = "-"
                             lines.append(
-                                f"ID:{t['id']} {t['symbol']} {t['side']} | "
-                                f"Entry:{t['entry_price']:.2f} | "
-                                f"Exit:{t['exit_price']:.2f} | "
-                                f"PnL:{t['pnl_percent']}%"
+                                f"ID:{t.get('id')} {t.get('symbol')} {t.get('side')} | "
+                                f"Entry:{_fmt_price(t.get('entry_price'))} | "
+                                f"Exit:{_fmt_price(t.get('exit_price'))} | "
+                                f"PnL:{pnl_str}%"
                             )
                         reply = "\n".join(lines)
                     await asyncio.to_thread(telegram_send, chat_id, reply)
@@ -1072,8 +1337,8 @@ ID: {best["id"]}
                         lines = ["📋 RECENT ALGORITHMS"]
                         for a in algos:
                             lines.append(
-                                f"ID:{a['id']} | {a['agent_name']} | "
-                                f"{a['symbol']} | Score:{a['score']}"
+                                f"ID:{a.get('id')} | {a.get('agent_name') or '-'} | "
+                                f"{a.get('symbol') or '-'} | Score:{a.get('score') or 0}"
                             )
                         reply = "\n".join(lines)
                     await asyncio.to_thread(telegram_send, chat_id, reply)
@@ -1101,6 +1366,18 @@ Commands:
 # MAIN
 # ============================================================
 
+async def preload_all():
+    """Preload all symbols with a concurrency limit (5) to avoid
+    hitting Binance REST rate limits with 30 simultaneous calls."""
+    semaphore = asyncio.Semaphore(5)
+
+    async def load(sym):
+        async with semaphore:
+            return await preload_market_data(sym)
+
+    return await asyncio.gather(*(load(s) for s in SYMBOLS), return_exceptions=True)
+
+
 async def main():
     logging.info("%s STARTING", APP_NAME)
 
@@ -1109,8 +1386,7 @@ async def main():
 
     # Preload historical data directly from Binance REST
     logging.info("📥 Preloading historical market data directly from Binance REST API...")
-    preload_tasks = [preload_market_data(symbol) for symbol in SYMBOLS]
-    results = await asyncio.gather(*preload_tasks, return_exceptions=True)
+    results = await preload_all()
 
     success_count = 0
     for i, r in enumerate(results):
@@ -1125,8 +1401,6 @@ async def main():
 
     if success_count == 0:
         logging.error("❌ No market data loaded. Bot will continue but AI research may not work.")
-    else:
-        logging.info("✅ Market data loaded successfully. AI research will start with the next cycle.")
 
     # Run core tasks
     await asyncio.gather(
@@ -1135,5 +1409,9 @@ async def main():
         telegram_loop(),
     )
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("🛑 Shutdown requested (Ctrl+C). Bye!")
