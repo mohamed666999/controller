@@ -56,6 +56,7 @@ import asyncio
 import logging
 import threading
 import traceback
+import random
 import builtins as _py_builtins
 from collections import deque
 from datetime import datetime, timezone
@@ -172,7 +173,7 @@ SYMBOLS = [
     "btcusdt", "ethusdt", "solusdt", "xrpusdt", "adausdt",
     "dogeusdt", "dotusdt", "avaxusdt", "maticusdt", "linkusdt",
     "uniusdt", "atomusdt", "ltcusdt", "bchusdt", "nearusdt",
-    "filusdt", "aptusdt", "arbusdt", "opusdt", "vetusdt",
+    "filusdt", "aptusdt", "arbusrt", "opusdt", "vetusdt",
     "icpusdt", "etcusdt", "xlmusdt", "thetausdt", "runeusdt",
     "aaveusdt", "mkrusdt", "crvusdt", "sushiusdt", "1inchusdt"
 ]
@@ -209,43 +210,26 @@ state = {
     }
 }
 
-# سجل تفصيلي لأخطاء كل نموذج (يغذي أمر /error في التليجرام)
 error_stats = {
     "DEEPSEEK_1": {
-        "timeout": 0,
-        "connection": 0,
-        "empty_response": 0,
-        "invalid_response": 0,
-        "api_error": 0,
-        "last_error": "",
-        "last_time": "",
+        "timeout": 0, "connection": 0, "empty_response": 0,
+        "invalid_response": 0, "api_error": 0,
+        "last_error": "", "last_time": "",
     },
     "DEEPSEEK_2": {
-        "timeout": 0,
-        "connection": 0,
-        "empty_response": 0,
-        "invalid_response": 0,
-        "api_error": 0,
-        "last_error": "",
-        "last_time": "",
+        "timeout": 0, "connection": 0, "empty_response": 0,
+        "invalid_response": 0, "api_error": 0,
+        "last_error": "", "last_time": "",
     },
     "KIMI": {
-        "timeout": 0,
-        "connection": 0,
-        "empty_response": 0,
-        "invalid_response": 0,
-        "api_error": 0,
-        "last_error": "",
-        "last_time": "",
+        "timeout": 0, "connection": 0, "empty_response": 0,
+        "invalid_response": 0, "api_error": 0,
+        "last_error": "", "last_time": "",
     },
     "LLAMA": {
-        "timeout": 0,
-        "connection": 0,
-        "empty_response": 0,
-        "invalid_response": 0,
-        "api_error": 0,
-        "last_error": "",
-        "last_time": "",
+        "timeout": 0, "connection": 0, "empty_response": 0,
+        "invalid_response": 0, "api_error": 0,
+        "last_error": "", "last_time": "",
     },
 }
 
@@ -401,7 +385,6 @@ def update_algorithm_score(algorithm_id, result):
     profit_factor = result.get("profit_factor", 0)
     max_drawdown = result.get("max_drawdown", 0)
 
-    # الشروط الدنيا لاعتماد الخوارزمية لتكون صالحة للتداول
     if total_trades >= 30 and win_rate >= 50 and profit_factor >= 1.2 and max_drawdown <= 20:
         status = "TESTED"
     else:
@@ -470,22 +453,18 @@ def save_trades_batch(algorithm_id, trades):
                 pass
 
 
-# ======================== تم التعديل هنا ========================
 def get_best_algorithm():
-    """إرجاع الخوارزمية ذات أعلى سكور (حتى لو لم تكن TESTED)."""
+    """Return the highest-score algorithm even if not TESTED."""
     if MEMORY_MODE:
         if not memory_db["algorithms"]:
             return None
-        # نأخذ أعلى سكور بشكل عام
         return max(memory_db["algorithms"], key=lambda x: x.get("score", -float('inf')))
-    # نبحث أولاً عن TESTED
     row = _db_run(
         "SELECT * FROM algorithms WHERE status='TESTED' ORDER BY score DESC LIMIT 1",
         fetch="one",
     )
     if row:
         return row
-    # إذا لم يوجد TESTED، نأخذ أعلى سكور من الكل
     row = _db_run(
         "SELECT * FROM algorithms ORDER BY score DESC LIMIT 1",
         fetch="one",
@@ -505,17 +484,30 @@ def get_recent_trades(limit=10):
 
 
 def get_algorithms_list(limit=4, offset=0):
-    """جلب الخوارزميات مع إمكانية التحديد (للـ pagination)."""
+    """Return paginated algorithms (newest first)."""
     if MEMORY_MODE:
-        # ترتيب تنازلي حسب تاريخ الإنشاء (الأحدث أولاً) باستخدام created_at إن وجد
-        sorted_algos = sorted(memory_db["algorithms"], key=lambda x: x.get("created_at", x.get("id", 0)), reverse=True)
-        return sorted_algos[offset:offset+limit]
+        sorted_algos = sorted(
+            memory_db["algorithms"],
+            key=lambda x: x.get("created_at", x.get("id", 0)),
+            reverse=True
+        )
+        return sorted_algos[offset:offset + limit]
     rows = _db_run(
-        "SELECT id, agent_name, symbol, score, created_at FROM algorithms ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        "SELECT id, agent_name, symbol, score, status, created_at FROM algorithms ORDER BY created_at DESC LIMIT %s OFFSET %s",
         (limit, offset),
         fetch="all",
     )
     return rows or []
+
+
+def count_algorithms():
+    """Total number of algorithms (for pagination)."""
+    if MEMORY_MODE:
+        return len(memory_db["algorithms"])
+    row = _db_run("SELECT COUNT(*) AS cnt FROM algorithms", fetch="one")
+    if row:
+        return row.get("cnt", 0) or 0
+    return 0
 
 
 def get_algo_by_id(algo_id):
@@ -532,7 +524,6 @@ def get_algo_by_id(algo_id):
 # ============================================================
 
 def fetch_klines_sync(symbol, retries=3):
-    """جلب البيانات مباشرة من منصة بينانس مع إعادة محاولة وتسجيل مفصل."""
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval=1m&limit=1500"
     for attempt in range(1, retries + 1):
         try:
@@ -540,11 +531,10 @@ def fetch_klines_sync(symbol, retries=3):
             if resp.status_code != 200:
                 logging.error(f"❌ Binance HTTP {resp.status_code} for {symbol}: {resp.text[:200]}")
                 if resp.status_code == 451:
-                    logging.error("🚫 Binance 451: Unavailable for legal reasons (likely US region). Consider using a VPN/proxy or deploy in EU region.")
+                    logging.error("🚫 Binance 451: Unavailable for legal reasons (likely US region).")
                 raise requests.exceptions.HTTPError(f"HTTP {resp.status_code}")
             data = resp.json()
             if isinstance(data, dict):
-                # Binance returned a JSON error object instead of kline rows
                 raise ValueError(f"Binance error payload for {symbol}: {str(data)[:200]}")
             if not data:
                 raise ValueError(f"Binance returned empty klines for {symbol}")
@@ -552,7 +542,7 @@ def fetch_klines_sync(symbol, retries=3):
         except Exception as e:
             logging.warning(f"⚠️ Attempt {attempt}/{retries} failed for {symbol}: {e}")
             if attempt < retries:
-                time.sleep(2 ** attempt)  # exponential backoff
+                time.sleep(2 ** attempt)
     raise Exception(f"Failed to fetch {symbol} after {retries} attempts")
 
 
@@ -597,7 +587,7 @@ def build_ws_url():
 
 async def websocket_worker():
     if not WEBSOCKETS_AVAILABLE:
-        logging.error("❌ 'websockets' package not installed - live market stream disabled (install: pip install websockets)")
+        logging.error("❌ 'websockets' package not installed - live market stream disabled")
         return
     url = build_ws_url()
     while True:
@@ -656,7 +646,7 @@ async def websocket_worker():
 def calculate_features(symbol):
     candles = list(market_cache["candles_1m"][symbol])
     if len(candles) < 20:
-        logging.warning(f"⚠️ {symbol}: only {len(candles)} candles (< 20), not enough data")
+        logging.warning(f"⚠️ {symbol}: only {len(candles)} candles (< 20)")
         return None
 
     trades = list(market_cache["trades"][symbol])
@@ -743,8 +733,7 @@ Search for hidden relationships involving:
 You must independently create a novel mathematical
 scalping indicator.
 
-You are NOT allowed to copy a conventional
-BUY/SELL rule.
+You are NOT allowed to copy a conventional BUY/SELL rule.
 
 The final Python code MUST define exactly:
 
@@ -765,15 +754,10 @@ The function must return a pandas Series containing only:
 0 = HOLD
 
 Do not use external APIs.
-
 Do not use files.
-
 Do not use network.
-
 Do not use subprocess.
-
 Do not use eval or exec.
-
 Do not import anything.
 
 You may use:
@@ -797,68 +781,136 @@ MARKET DATA SNAPSHOT:
 
 {json.dumps(features, indent=2)[:12000]} """
 
+
 def call_agent_sync(agent, features):
-prompt = build_prompt(features)
-headers = {
-"Authorization": f"Bearer {agent['api_key']}",
-"Content-Type": "application/json",
-"Accept": "application/json",
-}
-payload = {
-"model": agent["model"],
-"messages": [{"role": "user", "content": prompt}],
-"temperature": agent["temperature"],
-"max_tokens": agent.get("max_tokens", 8000),
-"stream": False,
-}
-if agent.get("reasoning_effort"):
-payload["reasoning_effort"] = agent["reasoning_effort"]
+    prompt = build_prompt(features)
+    headers = {
+        "Authorization": f"Bearer {agent['api_key']}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "model": agent["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": agent["temperature"],
+        "max_tokens": agent.get("max_tokens", 8000),
+        "stream": False,
+    }
+    if agent.get("reasoning_effort"):
+        payload["reasoning_effort"] = agent["reasoning_effort"]
+
+    try:
+        resp = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=agent.get("request_timeout", 300))
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None, f"Invalid response type: {type(data)}"
+        choices = data.get("choices") or []
+        if not choices:
+            return None, "Empty choices"
+        message = choices[0].get("message", {}) or {}
+        content = message.get("content") or message.get("reasoning_content") or ""
+        if not content:
+            return None, "Empty content"
+        return str(content), None
+    except requests.exceptions.Timeout:
+        return None, "Timeout"
+    except requests.exceptions.ConnectionError:
+        return None, "Connection error"
+    except Exception as e:
+        return None, str(e)
+
 
 async def run_agent_with_retries(agent, features):
-agent_name = agent["name"]
-max_attempts = agent.get("max_attempts", 3)
-timeout = agent.get("request_timeout", 300)
-start_total = time.time()
-timeout_on_last_attempt = False
+    agent_name = agent["name"]
+    max_attempts = agent.get("max_attempts", 3)
+    timeout = agent.get("request_timeout", 300)
+    start_total = time.time()
+    timeout_on_last_attempt = False
 
-============================================================
+    for attempt in range(1, max_attempts + 1):
+        start = time.time()
+        try:
+            text, error = await asyncio.to_thread(call_agent_sync, agent, features)
+        except Exception as e:
+            text, error = None, str(e)
+        elapsed_ms = int((time.time() - start) * 1000)
 
-PARSE & VALIDATE AI OUTPUT
+        if error:
+            if "Timeout" in str(error):
+                error_stats[agent_name]["timeout"] += 1
+                timeout_on_last_attempt = True
+            elif "Connection" in str(error):
+                error_stats[agent_name]["connection"] += 1
+            else:
+                error_stats[agent_name]["api_error"] += 1
+            error_stats[agent_name]["last_error"] = str(error)[:200]
+            error_stats[agent_name]["last_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            state["stats"][agent_name]["api_timeout"] += 1
+            logging.warning(f"⚠️ {agent_name} attempt {attempt}/{max_attempts} failed: {error}")
+            if attempt < max_attempts:
+                await asyncio.sleep(5)
+            continue
 
-============================================================
+        hypothesis, code = parse_ai_output(text)
+        valid, reason = validate_code(code)
+        if not valid:
+            state["stats"][agent_name]["invalid_code"] += 1
+            logging.warning(f"⚠️ {agent_name} attempt {attempt}/{max_attempts} invalid code: {reason}")
+            if attempt < max_attempts:
+                await asyncio.sleep(3)
+            continue
+
+        state["stats"][agent_name]["api_ok"] += 1
+        total_ms = int((time.time() - start_total) * 1000)
+        log_agent(agent, "OK", f"Valid code returned in {total_ms}ms", total_ms)
+        return hypothesis, code, elapsed_ms
+
+    total_ms = int((time.time() - start_total) * 1000)
+    log_agent(agent, "FAIL", f"All {max_attempts} attempts failed", total_ms)
+    return None, None, total_ms
+
+# ============================================================
+# PARSE & VALIDATE AI OUTPUT
+# ============================================================
 
 def parse_ai_output(text):
-"""Extract (hypothesis, code). Tolerant to markdown formatting."""
-if not text:
-return None, None
-cleaned = str(text).replace("**", "")
+    """Extract (hypothesis, code). Tolerant to markdown formatting."""
+    if not text:
+        return None, None
+    cleaned = str(text).replace("**", "")
 
-def _extract_code_block(text):
-"""Return the generate_signal python code from a model answer."""
-# 1) Prefer fenced blocks (python / py / plain )
-    for m in re.finditer(r"(?:python|py)?[ \t]*\r?\n", text, re.IGNORECASE):
-rest = text[m.end():]
-if "" in rest:
-            block = rest.split("", 1)[0]
-else:
-block = rest  # response was truncated before the closing fence
-block = block.strip()
-if "def generate_signal" in block:
-return block
-# 2) Fallback: raw function in the text
-idx = text.find("def generate_signal")
-if idx != -1:
-code = text[idx:]
-if "" in code:
-            code = code.split("", 1)[0]
-return code.strip()
-return None
+    def _extract_code_block(t):
+        for m in re.finditer(r"```(?:python|py)?[ \t]*\r?\n", t, re.IGNORECASE):
+            rest = t[m.end():]
+            if "```" in rest:
+                block = rest.split("```", 1)[0]
+            else:
+                block = rest
+            block = block.strip()
+            if "def generate_signal" in block:
+                return block
+        idx = t.find("def generate_signal")
+        if idx != -1:
+            code = t[idx:]
+            if "```" in code:
+                code = code.split("```", 1)[0]
+            return code.strip()
+        return None
+
+    code = _extract_code_block(cleaned)
+
+    hyp_match = re.search(r"HYPOTHESIS[:\s]+(.+?)(?=CODE:|$)", cleaned, re.IGNORECASE | re.DOTALL)
+    hypothesis = hyp_match.group(1).strip() if hyp_match else ""
+
+    return hypothesis, code
+
 
 _FORBIDDEN_CODE_PATTERNS = [
-r"\bimport\b",
-r"\bfrom\s+[\w.]+\s+import\b",
-r"import",
-r"\bopen\s*\(",
+    r"\bimport\b",
+    r"\bfrom\s+[\w.]+\s+import\b",
+    r"\bopen\s*\(",
     r"\bexec\s*\(",
     r"\beval\s*\(",
     r"\bcompile\s*\(",
@@ -875,283 +927,567 @@ r"\bopen\s*\(",
     r"\bshutil\b",
 ]
 
+
 def validate_code(code):
-if not code:
-return False, "No code"
-if "def generate_signal" not in code:
-return False, "generate_signal missing"
-# Strip comments and string literals before scanning, so words like
-# "requests" or "os." inside comments/docstrings cannot cause false
-# rejections (word-boundary regex also prevents "cos." -> "os.").
-scanned = re.sub(r"#.", "", code)
-scanned = re.sub(r"'(?:\.|[^'\])'|"(?:\.|[^"\])*"", "", scanned)
-for pattern in _FORBIDDEN_CODE_PATTERNS:
-if re.search(pattern, scanned):
-return False, f"Forbidden pattern: {pattern}"
-try:
-compile(code, "<ai_algorithm>", "exec")
-return True, "OK"
-except SyntaxError as e:
-return False, f"SyntaxError: {e}"
-except Exception as e:
-return False, str(e)
+    if not code:
+        return False, "No code"
+    if "def generate_signal" not in code:
+        return False, "generate_signal missing"
+    scanned = re.sub(r"#.*", "", code)
+    scanned = re.sub(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", "", scanned)
+    for pattern in _FORBIDDEN_CODE_PATTERNS:
+        if re.search(pattern, scanned):
+            return False, f"Forbidden pattern: {pattern}"
+    try:
+        compile(code, "<ai_algorithm>", "exec")
+        return True, "OK"
+    except SyntaxError as e:
+        return False, f"SyntaxError: {e}"
+    except Exception as e:
+        return False, str(e)
 
-============================================================
-
-SANDBOX FOR GENERATED INDICATORS
-
-============================================================
-
-Full builtins minus the dangerous ones. The previous tiny whitelist
-
-(abs/min/max/len/range/float/int) made almost every AI algorithm
-
-crash with NameError (sum, sorted, zip, enumerate, list...).
+# ============================================================
+# SANDBOX FOR GENERATED INDICATORS
+# ============================================================
 
 _BUILTIN_BLACKLIST = {
-"import", "open", "exec", "eval", "compile", "input", "breakpoint",
-"exit", "quit", "help", "license", "credits", "globals", "locals", "vars",
-"setattr", "delattr",
+    "import", "open", "exec", "eval", "compile", "input", "breakpoint",
+    "exit", "quit", "help", "license", "credits", "globals", "locals", "vars",
+    "setattr", "delattr",
 }
 
 SAFE_BUILTINS = {
-name: obj
-for name, obj in vars(_py_builtins).items()
-if name not in _BUILTIN_BLACKLIST
+    name: obj
+    for name, obj in vars(_py_builtins).items()
+    if name not in _BUILTIN_BLACKLIST
 }
+
 
 def _run_with_timeout(fn, args, timeout_s):
-"""Run fn(*args) in a daemon thread with a hard timeout."""
-box = {}
+    """Run fn(*args) in a daemon thread with a hard timeout."""
+    box = {}
+
+    def _target():
+        try:
+            box["result"] = fn(*args)
+        except Exception as e:
+            box["error"] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        raise TimeoutError(f"generate_signal exceeded {timeout_s}s")
+    if "error" in box:
+        raise box["error"]
+    if "result" not in box:
+        raise RuntimeError("generate_signal returned nothing")
+    return box["result"]
+
 
 def _normalize_signals(signals, df):
-"""Coerce the indicator output into a clean numeric Series aligned to df."""
-if isinstance(signals, pd.DataFrame):
-if signals.shape[1] != 1:
-raise ValueError("generate_signal must return a single column")
-signals = signals.iloc[:, 0]
-if isinstance(signals, pd.Series):
-raw = signals.to_numpy()
-elif isinstance(signals, (list, tuple, np.ndarray)):
-raw = np.asarray(signals)
-else:
-raise TypeError("generate_signal must return a Series / list / array")
-if len(raw) != len(df):
-raise ValueError(f"generate_signal returned {len(raw)} values, expected {len(df)}")
-numeric = pd.to_numeric(pd.Series(raw), errors="coerce")
-numeric = numeric.set_axis(df.index)
-return numeric.clip(-1, 1).fillna(0).astype(float)
+    """Coerce the indicator output into a clean numeric Series aligned to df."""
+    if isinstance(signals, pd.DataFrame):
+        if signals.shape[1] != 1:
+            raise ValueError("generate_signal must return a single column")
+        signals = signals.iloc[:, 0]
+    if isinstance(signals, pd.Series):
+        raw = signals.to_numpy()
+    elif isinstance(signals, (list, tuple, np.ndarray)):
+        raw = np.asarray(signals)
+    else:
+        raise TypeError("generate_signal must return a Series / list / array")
+    if len(raw) != len(df):
+        raise ValueError(f"generate_signal returned {len(raw)} values, expected {len(df)}")
+    numeric = pd.to_numeric(pd.Series(raw), errors="coerce")
+    numeric = numeric.set_axis(df.index)
+    return numeric.clip(-1, 1).fillna(0).astype(float)
+
 
 def run_algorithm(code, df):
-safe_globals = {
-"np": np,
-"pd": pd,
-"math": math,
-"builtins": SAFE_BUILTINS,
-"name": "ai_algorithm",
-}
-local_vars = {}
-exec(code, safe_globals, local_vars)  # sandboxed + pre-validated code
-fn = local_vars.get("generate_signal")
-if not callable(fn):
-raise ValueError("generate_signal missing or not callable")
-signals = _run_with_timeout(fn, (df.copy(),), 30)
-return _normalize_signals(signals, df)
+    safe_globals = {
+        "np": np,
+        "pd": pd,
+        "math": math,
+        "builtins": SAFE_BUILTINS,
+        "__name__": "ai_algorithm",
+    }
+    local_vars = {}
+    exec(code, safe_globals, local_vars)
+    fn = local_vars.get("generate_signal")
+    if not callable(fn):
+        raise ValueError("generate_signal missing or not callable")
+    signals = _run_with_timeout(fn, (df.copy(),), 30)
+    return _normalize_signals(signals, df)
 
-============================================================
-
-BACKTEST
-
-============================================================
+# ============================================================
+# BACKTEST
+# ============================================================
 
 def _ms_to_dt(ms):
-"""Convert Binance open_time (ms epoch) to a timezone-aware datetime.
+    """Convert Binance open_time (ms epoch) to a timezone-aware datetime."""
+    if ms is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000.0, tz=timezone.utc)
+    except Exception:
+        return None
+
 
 def backtest(symbol, code, algorithm_id=None):
-candles = list(market_cache["candles_1m"][symbol])
-if len(candles) < 20:
-return {
-"symbol": symbol.upper(),
-"total_trades": 0,
-"wins": 0,
-"losses": 0,
-"win_rate": 0,
-"profit_factor": 0,
-"max_drawdown": 0,
-"score": 0,
-"trades": [],
-}
+    candles = list(market_cache["candles_1m"][symbol])
+    if len(candles) < 20:
+        return {
+            "symbol": symbol.upper(),
+            "total_trades": 0, "wins": 0, "losses": 0,
+            "win_rate": 0, "profit_factor": 0, "max_drawdown": 0,
+            "score": 0, "trades": [],
+        }
 
-============================================================
+    df = pd.DataFrame(candles)
+    try:
+        signals = run_algorithm(code, df)
+    except Exception as e:
+        logging.error(f"⚠️ backtest error {symbol}: {e}")
+        return {
+            "symbol": symbol.upper(),
+            "total_trades": 0, "wins": 0, "losses": 0,
+            "win_rate": 0, "profit_factor": 0, "max_drawdown": 0,
+            "score": 0, "trades": [],
+        }
 
-RESEARCH CYCLE & LOOP
+    trades = []
+    position = None
+    entry_price = 0.0
+    take_profit = 0.0
+    stop_loss = 0.0
+    entry_time = None
+    wins = 0
+    losses = 0
+    gross_profit = 0.0
+    gross_loss = 0.0
+    peak_equity = 1000.0
+    equity = 1000.0
+    max_drawdown = 0.0
 
-============================================================
+    for i, row in df.iterrows():
+        price = float(row["close"])
+        sig = float(signals.iloc[i]) if i < len(signals) else 0.0
+        time_ms = row.get("open_time")
+
+        if position is None and sig != 0:
+            position = "LONG" if sig > 0 else "SHORT"
+            entry_price = price
+            entry_time = _ms_to_dt(time_ms)
+            if position == "LONG":
+                take_profit = entry_price * 1.005
+                stop_loss = entry_price * 0.995
+            else:
+                take_profit = entry_price * 0.995
+                stop_loss = entry_price * 1.005
+
+        if position is not None:
+            closed = False
+            exit_price = price
+            if position == "LONG":
+                if price >= take_profit or price <= stop_loss:
+                    closed = True
+            else:
+                if price <= take_profit or price >= stop_loss:
+                    closed = True
+
+            if closed or i == len(df) - 1:
+                if position == "LONG":
+                    pnl_pct = (exit_price - entry_price) / entry_price * 100.0
+                else:
+                    pnl_pct = (entry_price - exit_price) / entry_price * 100.0
+
+                status = "WIN" if pnl_pct > 0 else "LOSS"
+                if status == "WIN":
+                    wins += 1
+                    gross_profit += pnl_pct
+                else:
+                    losses += 1
+                    gross_loss += abs(pnl_pct)
+
+                equity *= (1 + pnl_pct / 100.0)
+                if equity > peak_equity:
+                    peak_equity = equity
+                dd = (peak_equity - equity) / peak_equity * 100.0
+                if dd > max_drawdown:
+                    max_drawdown = dd
+
+                trades.append({
+                    "symbol": symbol.upper(),
+                    "side": position,
+                    "entry_price": entry_price,
+                    "take_profit": take_profit,
+                    "stop_loss": stop_loss,
+                    "exit_price": exit_price,
+                    "status": status,
+                    "pnl_percent": round(pnl_pct, 4),
+                    "opened_at": entry_time,
+                    "closed_at": _ms_to_dt(time_ms),
+                })
+                position = None
+
+    total = wins + losses
+    win_rate = (wins / total * 100.0) if total else 0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
+    score = (
+        (win_rate * 0.4)
+        + (profit_factor * 20)
+        - (max_drawdown * 0.5)
+        + (min(total, 100) * 0.1)
+    )
+
+    result = {
+        "symbol": symbol.upper(),
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(win_rate, 2),
+        "profit_factor": round(profit_factor, 3),
+        "max_drawdown": round(max_drawdown, 2),
+        "score": round(score, 2),
+        "trades": trades,
+    }
+    return result
+
+# ============================================================
+# RESEARCH CYCLE & LOOP
+# ============================================================
 
 async def research_cycle():
-state["cycle"] += 1
-cycle_num = state["cycle"]
-logging.info(f"🔬 CYCLE {cycle_num} START")
+    state["cycle"] += 1
+    cycle_num = state["cycle"]
+    logging.info(f"🔬 CYCLE {cycle_num} START")
+
+    deep_symbols = random.sample(SYMBOLS, min(3, len(SYMBOLS)))
+
+    async def _task(agent, symbol):
+        features = calculate_features(symbol)
+        if not features:
+            return
+        hypothesis, code, duration_ms = await run_agent_with_retries(agent, features)
+        if not code:
+            return
+        try:
+            algo_id = await asyncio.to_thread(save_algorithm, agent, symbol, hypothesis or "", code)
+            result = await asyncio.to_thread(backtest, symbol, code, algo_id)
+            if algo_id:
+                await asyncio.to_thread(update_algorithm_score, algo_id, result)
+                await asyncio.to_thread(save_trades_batch, algo_id, result.get("trades", []))
+                status = "TESTED" if (
+                    result["total_trades"] >= 30 and
+                    result["win_rate"] >= 50 and
+                    result["profit_factor"] >= 1.2 and
+                    result["max_drawdown"] <= 20
+                ) else "REJECTED"
+                if status == "TESTED":
+                    state["stats"][agent["name"]]["tested"] += 1
+                else:
+                    state["stats"][agent["name"]]["rejected"] += 1
+                logging.info(
+                    f"✅ {agent['name']} {symbol}: score={result['score']} "
+                    f"wr={result['win_rate']}% pf={result['profit_factor']} dd={result['max_drawdown']} "
+                    f"trades={result['total_trades']} -> {status}"
+                )
+        except Exception as e:
+            logging.error(f"❌ task error {agent['name']} {symbol}: {e}")
+            logging.error(traceback.format_exc())
+
+    llama = next(a for a in AGENTS if a["role"] == "fast")
+    tasks = []
+    for symbol in SYMBOLS:
+        tasks.append(_task(llama, symbol))
+    for a in AGENTS:
+        if a["role"] == "deep":
+            for symbol in deep_symbols:
+                tasks.append(_task(a, symbol))
+
+    await asyncio.gather(*tasks, return_exceptions=True)
+
 
 async def research_loop():
-while True:
-try:
-await research_cycle()
-except Exception:
-logging.error(traceback.format_exc())
-logging.info("⏳ Sleeping 30 minutes...")
-await asyncio.sleep(30 * 60)
+    while True:
+        try:
+            await research_cycle()
+        except Exception:
+            logging.error(traceback.format_exc())
+        logging.info("⏳ Sleeping 30 minutes...")
+        await asyncio.sleep(30 * 60)
 
-============================================================
-
-TELEGRAM API (with conflict handling)
-
-============================================================
+# ============================================================
+# TELEGRAM API (with conflict handling)
+# ============================================================
 
 TELEGRAM_OFFSET = 0
 
-def telegram_request(method, payload=None, http_timeout=45):
-url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-try:
-response = requests.post(url, json=payload or {}, timeout=http_timeout)
-return response.json()
-except Exception as e:
-logging.error("❌ telegram_request %s failed: %s", method, e)
-return {"ok": False, "error_code": -1, "description": str(e)}
 
-======================== تم التعديل هنا ========================
+def telegram_request(method, payload=None, http_timeout=45):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
+    try:
+        response = requests.post(url, json=payload or {}, timeout=http_timeout)
+        return response.json()
+    except Exception as e:
+        logging.error("❌ telegram_request %s failed: %s", method, e)
+        return {"ok": False, "error_code": -1, "description": str(e)}
+
 
 def telegram_send(chat_id, text, reply_markup=None):
-"""إرسال رسالة مع إمكانية إضافة أزرار Inline."""
-payload = {"chat_id": chat_id, "text": str(text)[:4000]}
-if reply_markup:
-payload["reply_markup"] = reply_markup
-return telegram_request("sendMessage", payload)
+    """Send a message, optionally with inline keyboard."""
+    payload = {"chat_id": chat_id, "text": str(text)[:4000]}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return telegram_request("sendMessage", payload)
+
 
 def telegram_edit_message(chat_id, message_id, text, reply_markup=None):
-"""تعديل رسالة موجودة (للتحديث عند الضغط على زر)."""
-payload = {"chat_id": chat_id, "message_id": message_id, "text": str(text)[:4000]}
-if reply_markup:
-payload["reply_markup"] = reply_markup
-return telegram_request("editMessageText", payload)
+    """Edit an existing message (for button pagination)."""
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": str(text)[:4000]}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return telegram_request("editMessageText", payload)
+
 
 def telegram_skip_backlog():
-"""On startup, discard queued old updates so restarts don't replay
-every old command (which previously re-executed on each restart)."""
-global TELEGRAM_OFFSET
-data = telegram_request("getUpdates", {"offset": -1, "limit": 1})
-if data and data.get("ok"):
-result = data.get("result", [])
-if result:
-TELEGRAM_OFFSET = result[-1]["update_id"] + 1
-logging.info("↪️ Telegram backlog skipped (old commands will not be replayed)")
+    """Discard queued old updates so restarts don't replay every old command."""
+    global TELEGRAM_OFFSET
+    data = telegram_request("getUpdates", {"offset": -1, "limit": 1})
+    if data and data.get("ok"):
+        result = data.get("result", [])
+        if result:
+            TELEGRAM_OFFSET = result[-1]["update_id"] + 1
+            logging.info("↪️ Telegram backlog skipped")
+
 
 def _fmt_price(value):
-if value is None:
-return "OPEN"
-try:
-return f"{float(value):.6g}"
-except (TypeError, ValueError):
-return "?"
+    if value is None:
+        return "OPEN"
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return "?"
 
-============================================================
 
-TELEGRAM REPORT BUILDERS (Arabic error & performance reports)
+def _fmt_date(value):
+    if not value:
+        return "-"
+    if isinstance(value, datetime):
+        return value.strftime("%m-%d %H:%M")
+    s = str(value)
+    return s[:16].replace("T", " ")
 
-============================================================
+# ============================================================
+# TELEGRAM REPORT BUILDERS (Arabic error & performance reports)
+# ============================================================
 
 _ERROR_CATEGORY_LABELS = [
-("timeout", "⏱ انتهت المهلة"),
-("connection", "🔌 انقطاع اتصال"),
-("empty_response", "📭 رد فارغ"),
-("invalid_response", "📭 رد غير صالح"),
-("api_error", "⚠️ خطأ API"),
+    ("timeout", "⏱ انتهت المهلة"),
+    ("connection", "🔌 انقطاع اتصال"),
+    ("empty_response", "📭 رد فارغ"),
+    ("invalid_response", "📭 رد غير صالح"),
+    ("api_error", "⚠️ خطأ API"),
 ]
 
 _ERROR_DIAGNOSIS = {
-"timeout": "بطء استجابة NVIDIA والنماذج ذات التفكير الطويل.",
-"connection": "انقطاع الاتصال بشبكة NVIDIA API.",
-"empty_response": "النماذج تعيد ردوداً فارغة أو غير مكتملة.",
-"invalid_response": "ردود غير صالحة (JSON مكسور أو بنية غير متوقعة) من NVIDIA API.",
-"api_error": "أخطاء من NVIDIA API (تحقق من المفاتيح وحدود الاستخدام).",
+    "timeout": "بطء استجابة NVIDIA والنماذج ذات التفكير الطويل.",
+    "connection": "انقطاع الاتصال بشبكة NVIDIA API.",
+    "empty_response": "النماذج تعيد ردوداً فارغة أو غير مكتملة.",
+    "invalid_response": "ردود غير صالحة (JSON مكسور أو بنية غير متوقعة) من NVIDIA API.",
+    "api_error": "أخطاء من NVIDIA API (تحقق من المفاتيح وحدود الاستخدام).",
 }
+
 
 def _fmt_rate(rate):
-"""50.0 -> '50', 6.25 -> '6.25' (matches the report examples)."""
-return f"{rate:.2f}".rstrip("0").rstrip(".") or "0"
+    return f"{rate:.2f}".rstrip("0").rstrip(".") or "0"
+
 
 def build_error_report():
-"""تقرير الأخطاء التفصيلي بالعربية (يُعرض عبر /error و /errors)."""
-total_failed = sum(d["api_timeout"] for d in state["stats"].values())
-cat_totals = {
-cat: sum(error_stats.get(a["name"], {}).get(cat, 0) for a in AGENTS)
-for cat, _ in _ERROR_CATEGORY_LABELS
-}
+    """Detailed Arabic error report (for /error and /errors)."""
+    total_failed = sum(d["api_timeout"] for d in state["stats"].values())
+    cat_totals = {
+        cat: sum(error_stats.get(a["name"], {}).get(cat, 0) for a in AGENTS)
+        for cat, _ in _ERROR_CATEGORY_LABELS
+    }
+    lines = [
+        "📊 تقرير الأخطاء التفصيلي",
+        "",
+        f"🔴 مجموع المحاولات الفاشلة: {total_failed}",
+        "",
+        "📋 توزيع الأخطاء حسب النوع:",
+    ]
+    for cat, label in _ERROR_CATEGORY_LABELS:
+        lines.append(f"  {label}: {cat_totals.get(cat, 0)}")
+    lines.append("")
+    lines.append("🤖 تفصيل الأخطاء حسب النموذج:")
+    lines.append("")
+    for agent in AGENTS:
+        name = agent["name"]
+        d = error_stats.get(name, {})
+        total = sum(d.get(c, 0) for c, _ in _ERROR_CATEGORY_LABELS)
+        lines.append(f"{agent.get('emoji', '🤖')} {name} — إجمالي: {total}")
+        for cat, label in _ERROR_CATEGORY_LABELS:
+            v = d.get(cat, 0)
+            if v:
+                lines.append(f"  • {label}: {v}")
+        if d.get("last_error"):
+            lines.append(f"  ⏰ آخر خطأ ({d.get('last_time', '')}):")
+            lines.append(f"     {d['last_error'][:160]}")
+        lines.append("")
+    lines.append("💡 التشخيصات العامة:")
+    for cat, _ in _ERROR_CATEGORY_LABELS:
+        if cat_totals.get(cat, 0):
+            lines.append(f"• {_ERROR_DIAGNOSIS.get(cat, '')}")
+    return "\n".join(lines).strip()
+
 
 def build_agents_report():
-"""تقرير أداء النماذج (يُعرض عبر /agents)."""
-lines = ["🤖 أداء النماذج", ""]
-for agent in AGENTS:
-name = agent["name"]
-d = state["stats"].get(name, {})
-ok = d.get("api_ok", 0)
-fail = d.get("api_timeout", 0)
-calls = ok + fail
-rate = (ok / calls * 100) if calls else 0.0
-lines.append(f"{agent.get('emoji', '🤖')} {name}")
-lines.append(f"✅ نجح: {ok}")
-lines.append(f"❌ فشل: {fail}")
-lines.append(f"📊 نسبة الاستجابة: {_fmt_rate(rate)}%")
-lines.append("")
-return "\n".join(lines).strip()
+    lines = ["🤖 أداء النماذج", ""]
+    for agent in AGENTS:
+        name = agent["name"]
+        d = state["stats"].get(name, {})
+        ok = d.get("api_ok", 0)
+        fail = d.get("api_timeout", 0)
+        calls = ok + fail
+        rate = (ok / calls * 100) if calls else 0.0
+        lines.append(f"{agent.get('emoji', '🤖')} {name}")
+        lines.append(f"✅ نجح: {ok}")
+        lines.append(f"❌ فشل: {fail}")
+        lines.append(f"📊 نسبة الاستجابة: {_fmt_rate(rate)}%")
+        lines.append(f"🧪 TESTED: {d.get('tested', 0)} | ❌ REJECTED: {d.get('rejected', 0)}")
+        lines.append("")
+    return "\n".join(lines).strip()
 
-============================================================
+# ============================================================
+# PAGINATION HELPER
+# ============================================================
 
-TELEGRAM LOOP (مع دعم الأزرار)
+PAGE_SIZE = 4
 
-============================================================
+
+def build_list_message(offset):
+    """Build the /list text and inline keyboard for the given offset."""
+    algos = get_algorithms_list(limit=PAGE_SIZE, offset=offset)
+    total = count_algorithms()
+
+    if not algos:
+        text = "📋 لا توجد خوارزميات بعد.\n\nسيبدأ الباحثون بإنتاج الخوارزميات قريباً إن شاء الله."
+        return text, None
+
+    page_num = (offset // PAGE_SIZE) + 1
+    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+
+    lines = [
+        f"📋 قائمة الخوارزميات (صفحة {page_num}/{total_pages})",
+        f"🔢 إجمالي الخوارزميات: {total}",
+        "",
+    ]
+    for a in algos:
+        score = a.get("score") if isinstance(a, dict) else a.get("score")
+        score = score if score is not None else 0
+        status = a.get("status") if isinstance(a, dict) else None
+        status_icon = "✅" if status == "TESTED" else ("❌" if status == "REJECTED" else "⏳")
+        lines.append(
+            f"🆔 {a.get('id')} | {a.get('agent_name') or '-'} | "
+            f"{(a.get('symbol') or '-').upper()} | ⭐ {score:.2f} {status_icon}"
+        )
+    lines.append("")
+    lines.append("💡 استخدم /code <ID> لعرض كود الخوارزمية.")
+
+    keyboard = {"inline_keyboard": []}
+    if offset + PAGE_SIZE < total:
+        next_offset = offset + PAGE_SIZE
+        keyboard["inline_keyboard"].append([
+            {"text": "⬇️ More (المزيد)", "callback_data": f"list:{next_offset}"}
+        ])
+    elif total <= PAGE_SIZE:
+        keyboard = None
+    else:
+        keyboard = None
+
+    return "\n".join(lines), keyboard
+
+# ============================================================
+# TELEGRAM LOOP (with callback button support)
+# ============================================================
 
 async def telegram_loop():
-global TELEGRAM_OFFSET
-await asyncio.to_thread(telegram_skip_backlog)
-while True:
-try:
-# NOTE: HTTP timeout (45s) must be strictly greater than the
-# long-poll timeout (25s), otherwise borderline read timeouts.
-data = await asyncio.to_thread(
-telegram_request,
-"getUpdates",
-{"offset": TELEGRAM_OFFSET, "timeout": 25},
-45,
-)
+    global TELEGRAM_OFFSET
+    await asyncio.to_thread(telegram_skip_backlog)
 
+    while True:
+        try:
+            data = await asyncio.to_thread(
+                telegram_request,
+                "getUpdates",
+                {"offset": TELEGRAM_OFFSET, "timeout": 25},
+                45,
+            )
+            if not data or not data.get("ok"):
+                await asyncio.sleep(2)
+                continue
+
+            for update in data.get("result", []):
+                update_id = update.get("update_id", 0)
+                if update_id >= TELEGRAM_OFFSET:
+                    TELEGRAM_OFFSET = update_id + 1
+
+                # -------- Handle callback queries (button presses) --------
+                if "callback_query" in update:
+                    cq = update["callback_query"]
+                    chat_id = cq.get("message", {}).get("chat", {}).get("id")
+                    message_id = cq.get("message", {}).get("message_id")
+                    cb_data = cq.get("data", "")
+
+                    if chat_id and message_id:
+                        if cb_data.startswith("list:"):
+                            try:
+                                next_offset = int(cb_data.split(":", 1)[1])
+                            except Exception:
+                                next_offset = 0
+                            text, kb = build_list_message(next_offset)
+                            await asyncio.to_thread(
+                                telegram_edit_message, chat_id, message_id, text, kb
+                            )
+                        try:
+                            telegram_request("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+                        except Exception:
+                            pass
+                    continue
+
+                # -------- Regular messages --------
+                msg = update.get("message") or {}
+                chat_id = msg.get("chat", {}).get("id")
+                text = (msg.get("text") or "").strip()
+                if not chat_id or not text.startswith("/"):
+                    continue
+
+                parts = text.split()
+                cmd = parts[0].split("@")[0].lower()
+
+                if cmd == "/start":
+                    reply = f"""
 🤖 {APP_NAME}
-{db_mode}
-⏱ Uptime: {uptime}
-🔄 Cycles: {state["cycle"]}
 
-📊 Agent Performance Metrics:
-{stats_str}
+مرحباً بك في مختبر الخوارزميات الذكي!
+
+البوت يعمل الآن ويبحث باستمرار عن أفضل خوارزميات التداول عبر 30 رمزاً رقماً باستخدام 4 نماذج ذكاء اصطناعي متخصصة.
+
+الأوامر المتاحة:
+/status - حالة النظام
+/best - أفضل خوارزمية (أعلى سكور)
+/list - قائمة الخوارزميات (مقسمة لصفحات)
+/trades - آخر الصفقات الورقية
+/error - تقرير الأخطاء التفصيلي
+/agents - أداء النماذج
+/help - هذه الرسالة
 """
-await asyncio.to_thread(telegram_send, chat_id, reply)
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
 
-🏆 أفضل خوارزمية (حسب أعلى سكور)
-
-🆔 ID: {best.get("id")}
-🤖 AI: {best.get("agent_name") or "-"}
-🧠 Model: {best.get("model_name") or "-"}
-📊 Symbol: {best.get("symbol") or "-"}
-⭐ Score: {best.get("score") or 0}
-🎯 Win Rate: {win_rate:.2f}%
-📈 Profit Factor: {profit_factor:.3f}
-📉 Max Drawdown: {max_drawdown:.2f}%
-🏷 الحالة: {status_str}
-
-📝 Hypothesis:
-{hypothesis}
-"""
-await asyncio.to_thread(telegram_send, chat_id, reply)
-
+                elif cmd == "/help":
+                    reply = f"""
 🤖 AI ALGORITHM LAB
 
 Commands:
@@ -1167,24 +1503,162 @@ Commands:
 /agents      - Per-model performance
 /help        - This message
 """
-await asyncio.to_thread(telegram_send, chat_id, reply)
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
 
-============================================================
+                elif cmd == "/status":
+                    db_mode = "MEMORY MODE" if MEMORY_MODE else "PostgreSQL"
+                    uptime = str(datetime.now(timezone.utc) - state["started_at"]).split(".")[0]
+                    stats_lines = []
+                    for a in AGENTS:
+                        d = state["stats"].get(a["name"], {})
+                        ok = d.get("api_ok", 0)
+                        fail = d.get("api_timeout", 0)
+                        stats_lines.append(
+                            f"{a.get('emoji', '🤖')} {a['name']}: ✅{ok} ❌{fail} "
+                            f"🧪{d.get('tested', 0)} ❌{d.get('rejected', 0)}"
+                        )
+                    stats_str = "\n".join(stats_lines)
+                    reply = f"""
+🤖 {APP_NAME}
+{db_mode}
+⏱ Uptime: {uptime}
+🔄 Cycles: {state["cycle"]}
 
-MAIN
+📊 Agent Performance Metrics:
+{stats_str}
+"""
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
 
-============================================================
+                elif cmd in ("/best", "/scalping"):
+                    best = await asyncio.to_thread(get_best_algorithm)
+                    if not best:
+                        await asyncio.to_thread(
+                            telegram_send, chat_id,
+                            "⏳ لا توجد خوارزميات بعد. الباحثون يعملون الآن."
+                        )
+                        continue
+                    try:
+                        win_rate = float(best.get("win_rate") or 0)
+                        profit_factor = float(best.get("profit_factor") or 0)
+                        max_drawdown = float(best.get("max_drawdown") or 0)
+                    except (TypeError, ValueError):
+                        win_rate = profit_factor = max_drawdown = 0.0
+                    status = best.get("status") or "UNKNOWN"
+                    status_icon = "✅" if status == "TESTED" else ("❌" if status == "REJECTED" else "⏳")
+                    status_str = f"{status_icon} {status}"
+                    hypothesis = str(best.get("hypothesis") or "-")[:600]
+                    reply = f"""
+🏆 أفضل خوارزمية (حسب أعلى سكور)
+
+🆔 ID: {best.get('id')}
+🤖 AI: {best.get('agent_name') or '-'}
+🧠 Model: {best.get('model_name') or '-'}
+📊 Symbol: {best.get('symbol') or '-'}
+⭐ Score: {best.get('score') or 0}
+🎯 Win Rate: {win_rate:.2f}%
+📈 Profit Factor: {profit_factor:.3f}
+📉 Max Drawdown: {max_drawdown:.2f}%
+🏷 الحالة: {status_str}
+
+📝 Hypothesis:
+{hypothesis}
+"""
+                    await asyncio.to_thread(telegram_send, chat_id, reply)
+
+                elif cmd == "/code":
+                    if len(parts) < 2:
+                        await asyncio.to_thread(
+                            telegram_send, chat_id,
+                            "❌ استخدم: /code <ID> لعرض كود الخوارزمية"
+                        )
+                        continue
+                    try:
+                        algo_id = int(parts[1])
+                    except ValueError:
+                        await asyncio.to_thread(
+                            telegram_send, chat_id,
+                            "❌ معرف غير صالح. يجب أن يكون رقم صحيح."
+                        )
+                        continue
+                    algo = await asyncio.to_thread(get_algo_by_id, algo_id)
+                    if not algo:
+                        await asyncio.to_thread(
+                            telegram_send, chat_id,
+                            f"❌ لم يتم العثور على خوارزمية بالمعرف {algo_id}"
+                        )
+                        continue
+                    code = algo.get("code") or "-"
+                    header = (
+                        f"🆔 {algo.get('id')} | {algo.get('agent_name')} | "
+                        f"{(algo.get('symbol') or '-').upper()}\n\n"
+                    )
+                    await asyncio.to_thread(telegram_send, chat_id, header + f"```\n{code}\n```")
+
+                elif cmd == "/trades":
+                    trades = await asyncio.to_thread(get_recent_trades, 10)
+                    if not trades:
+                        await asyncio.to_thread(
+                            telegram_send, chat_id,
+                            "⏳ لا توجد صفقات ورقية بعد."
+                        )
+                        continue
+                    lines = ["💼 آخر 10 صفقات ورقية:", ""]
+                    for t in trades:
+                        pnl = t.get("pnl_percent", 0) or 0
+                        icon = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                        lines.append(
+                            f"{icon} {(t.get('symbol') or '-').upper()} {t.get('side')} "
+                            f"{_fmt_price(t.get('entry_price'))} → {_fmt_price(t.get('exit_price'))} "
+                            f"| {t.get('status')} {pnl:+.2f}% | {_fmt_date(t.get('opened_at'))}"
+                        )
+                    await asyncio.to_thread(telegram_send, chat_id, "\n".join(lines))
+
+                elif cmd in ("/list", "/algorithms"):
+                    text, kb = build_list_message(0)
+                    await asyncio.to_thread(telegram_send, chat_id, text, kb)
+
+                elif cmd in ("/error", "/errors"):
+                    report = build_error_report()
+                    await asyncio.to_thread(telegram_send, chat_id, report)
+
+                elif cmd == "/agents":
+                    report = build_agents_report()
+                    await asyncio.to_thread(telegram_send, chat_id, report)
+
+        except Exception as e:
+            logging.error("❌ telegram_loop error: %s", e)
+            logging.error(traceback.format_exc())
+            await asyncio.sleep(5)
+
+# ============================================================
+# MAIN
+# ============================================================
 
 async def preload_all():
-"""Preload all symbols with a concurrency limit (5) to avoid
-hitting Binance REST rate limits with 30 simultaneous calls."""
-semaphore = asyncio.Semaphore(5)
+    """Preload all symbols with concurrency limit of 5 to avoid rate limits."""
+    semaphore = asyncio.Semaphore(5)
+
+    async def _load(symbol):
+        async with semaphore:
+            await preload_market_data(symbol)
+
+    await asyncio.gather(*[_load(s) for s in SYMBOLS], return_exceptions=True)
+
 
 async def main():
-logging.info("%s STARTING", APP_NAME)
+    logging.info("%s STARTING", APP_NAME)
+    await asyncio.to_thread(init_database)
+    await preload_all()
 
-if name == "main":
-try:
-asyncio.run(main())
-except KeyboardInterrupt:
-logging.info("🛑 Shutdown requested (Ctrl+C). Bye!")
+    await asyncio.gather(
+        websocket_worker(),
+        research_loop(),
+        telegram_loop(),
+    )
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("🛑 Shutdown requested (Ctrl+C). Bye!")
