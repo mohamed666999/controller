@@ -221,7 +221,7 @@ state = {
 
 for agent in AGENTS:
     state["stats"][agent["name"]] = {
-        "api_ok": 0, "api_timeout": 0, "invalid_code": 0, "tested": 0, "rejected": 0,
+        "api_ok": 0, "attempt_failures": 0, "tasks_failed": 0, "invalid_code": 0, "tested": 0, "rejected": 0,
         "queue_active": 0, "queue_waiting": 0, "total_requests": 0,
         "total_duration_ms": 0, "success_count": 0,
         "consecutive_failures": 0, "cooldown_until": 0.0
@@ -229,23 +229,23 @@ for agent in AGENTS:
 
 error_stats = {
     "DEEPSEEK_1": {
-        "timeout": 0, "connection": 0, "empty_response": 0,
-        "invalid_response": 0, "api_error": 0,
+        "timeout": 0, "connection": 0, "overloaded": 0, "rate_limit": 0,
+        "empty_response": 0, "invalid_response": 0, "api_error": 0,
         "last_error": "", "last_time": "",
     },
     "DEEPSEEK_2": {
-        "timeout": 0, "connection": 0, "empty_response": 0,
-        "invalid_response": 0, "api_error": 0,
+        "timeout": 0, "connection": 0, "overloaded": 0, "rate_limit": 0,
+        "empty_response": 0, "invalid_response": 0, "api_error": 0,
         "last_error": "", "last_time": "",
     },
     "KIMI": {
-        "timeout": 0, "connection": 0, "empty_response": 0,
-        "invalid_response": 0, "api_error": 0,
+        "timeout": 0, "connection": 0, "overloaded": 0, "rate_limit": 0,
+        "empty_response": 0, "invalid_response": 0, "api_error": 0,
         "last_error": "", "last_time": "",
     },
     "LLAMA": {
-        "timeout": 0, "connection": 0, "empty_response": 0,
-        "invalid_response": 0, "api_error": 0,
+        "timeout": 0, "connection": 0, "overloaded": 0, "rate_limit": 0,
+        "empty_response": 0, "invalid_response": 0, "api_error": 0,
         "last_error": "", "last_time": "",
     },
 }
@@ -818,6 +818,10 @@ def call_agent_sync(agent, features):
 
     try:
         resp = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=agent.get("request_timeout", 300))
+        if resp.status_code == 529:
+            return None, f"OVERLOADED 529: {resp.text[:200]}"
+        if resp.status_code == 429:
+            return None, f"RATELIMIT 429: {resp.text[:200]}"
         if resp.status_code != 200:
             return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
         data = resp.json()
@@ -861,19 +865,36 @@ async def run_agent_with_retries(agent, features):
         elapsed_ms = int((time.time() - start) * 1000)
 
         if error:
-            if "Timeout" in str(error):
+            error_str = str(error)
+
+            if "OVERLOADED 529" in error_str:
+                error_stats[agent_name]["overloaded"] += 1
+                wait_time = min(30 * (2 ** (attempt - 1)), 300)
+
+            elif "RATELIMIT 429" in error_str:
+                error_stats[agent_name]["rate_limit"] += 1
+                wait_time = min(60 * attempt, 600)
+
+            elif "Timeout" in error_str:
                 error_stats[agent_name]["timeout"] += 1
+                wait_time = 15 * attempt
                 timeout_on_last_attempt = True
-            elif "Connection" in str(error):
+
+            elif "Connection" in error_str:
                 error_stats[agent_name]["connection"] += 1
+                wait_time = 15 * attempt
+
             else:
                 error_stats[agent_name]["api_error"] += 1
-            error_stats[agent_name]["last_error"] = str(error)[:200]
+                wait_time = 15 * attempt
+
+            error_stats[agent_name]["last_error"] = error_str[:200]
             error_stats[agent_name]["last_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            state["stats"][agent_name]["api_timeout"] += 1
+            state["stats"][agent_name]["attempt_failures"] += 1
+            
             logging.warning(f"⚠️ {agent_name} attempt {attempt}/{max_attempts} failed: {error}")
             if attempt < max_attempts:
-                await asyncio.sleep(5)
+                await asyncio.sleep(wait_time)
             continue
 
         hypothesis, code = parse_ai_output(text)
@@ -890,6 +911,8 @@ async def run_agent_with_retries(agent, features):
         log_agent(agent, "OK", f"Valid code returned in {total_ms}ms", total_ms)
         return hypothesis, code, elapsed_ms
 
+    # في حالة فشل جميع المحاولات، نزيد عداد الفشل الكلي مرة واحدة فقط وليس مع كل محاولة
+    state["stats"][agent_name]["tasks_failed"] += 1
     total_ms = int((time.time() - start_total) * 1000)
     log_agent(agent, "FAIL", f"All {max_attempts} attempts failed", total_ms)
     return None, None, total_ms
@@ -1343,6 +1366,8 @@ def _fmt_date(value):
 _ERROR_CATEGORY_LABELS = [
     ("timeout", "⏱ انتهت المهلة"),
     ("connection", "🔌 انقطاع اتصال"),
+    ("overloaded", "🟠 الخدمة مشغولة (529)"),
+    ("rate_limit", "🛑 تجاوز الحد الأقصى (429)"),
     ("empty_response", "📭 رد فارغ"),
     ("invalid_response", "📭 رد غير صالح"),
     ("api_error", "⚠️ خطأ API"),
@@ -1351,6 +1376,8 @@ _ERROR_CATEGORY_LABELS = [
 _ERROR_DIAGNOSIS = {
     "timeout": "بطء استجابة NVIDIA والنماذج ذات التفكير الطويل.",
     "connection": "انقطاع الاتصال بشبكة NVIDIA API.",
+    "overloaded": "خوادم مزود الخدمة (NVIDIA/Model) مزدحمة مؤقتاً.",
+    "rate_limit": "تم تجاوز حد الطلبات المسموح به (Rate Limit).",
     "empty_response": "النماذج تعيد ردوداً فارغة أو غير مكتملة.",
     "invalid_response": "ردود غير صالحة (JSON مكسور أو بنية غير متوقعة) من NVIDIA API.",
     "api_error": "أخطاء من NVIDIA API (تحقق من المفاتيح وحدود الاستخدام).",
@@ -1363,7 +1390,7 @@ def _fmt_rate(rate):
 
 def build_error_report():
     """Detailed Arabic error report (for /error and /errors)."""
-    total_failed = sum(d["api_timeout"] for d in state["stats"].values())
+    total_failed = sum(d["tasks_failed"] for d in state["stats"].values())
     cat_totals = {
         cat: sum(error_stats.get(a["name"], {}).get(cat, 0) for a in AGENTS)
         for cat, _ in _ERROR_CATEGORY_LABELS
@@ -1371,7 +1398,7 @@ def build_error_report():
     lines = [
         "📊 تقرير الأخطاء التفصيلي",
         "",
-        f"🔴 مجموع المحاولات الفاشلة: {total_failed}",
+        f"🔴 مجموع المهام الفاشلة نهائياً: {total_failed}",
         "",
         "📋 توزيع الأخطاء حسب النوع:",
     ]
@@ -1406,7 +1433,7 @@ def build_agents_report():
         name = agent["name"]
         d = state["stats"].get(name, {})
         ok = d.get("api_ok", 0)
-        fail = d.get("api_timeout", 0)
+        fail = d.get("tasks_failed", 0)
         calls = ok + fail
         rate = (ok / calls * 100) if calls else 0.0
         lines.append(f"{agent.get('emoji', '🤖')} {name}")
@@ -1445,7 +1472,7 @@ def build_queue_report():
         lines.append(f"  ⏱ متوسط الاستجابة: {avg_sec:.1f} ثانية")
         lines.append("")
 
-    timeout_total = sum(d.get("api_timeout", 0) for d in state["stats"].values())
+    timeout_total = sum(d.get("tasks_failed", 0) for d in state["stats"].values())
     lines.append(f"🚨 الطلبات الملغاة بسبب الفشل: {timeout_total}")
     return "\n".join(lines).strip()
 
@@ -1603,7 +1630,7 @@ Commands:
                     for a in AGENTS:
                         d = state["stats"].get(a["name"], {})
                         ok = d.get("api_ok", 0)
-                        fail = d.get("api_timeout", 0)
+                        fail = d.get("tasks_failed", 0)
                         stats_lines.append(
                             f"{a.get('emoji', '🤖')} {a['name']}: ✅{ok} ❌{fail} "
                             f"🧪{d.get('tested', 0)} ❌{d.get('rejected', 0)}"
