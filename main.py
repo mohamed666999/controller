@@ -196,19 +196,35 @@ for symbol in SYMBOLS:
     market_cache["prices"][symbol] = 0.0
 
 # ============================================================
+# CONCURRENCY & QUEUES
+# ============================================================
+
+AGENT_CONCURRENCY = {
+    "DEEPSEEK_1": 1,
+    "DEEPSEEK_2": 1,
+    "KIMI": 1,
+    "LLAMA": 3,
+}
+
+agent_semaphores = {}  # سيتم تهيئتها في دالة main()
+
+# ============================================================
 # STATE & IN-MEMORY DATABASE
 # ============================================================
 
 state = {
     "started_at": datetime.now(timezone.utc),
     "cycle": 0,
-    "stats": {
-        "DEEPSEEK_1": {"api_ok": 0, "api_timeout": 0, "invalid_code": 0, "tested": 0, "rejected": 0},
-        "DEEPSEEK_2": {"api_ok": 0, "api_timeout": 0, "invalid_code": 0, "tested": 0, "rejected": 0},
-        "KIMI":       {"api_ok": 0, "api_timeout": 0, "invalid_code": 0, "tested": 0, "rejected": 0},
-        "LLAMA":      {"api_ok": 0, "api_timeout": 0, "invalid_code": 0, "tested": 0, "rejected": 0},
-    }
+    "stats": {}
 }
+
+for agent in AGENTS:
+    state["stats"][agent["name"]] = {
+        "api_ok": 0, "api_timeout": 0, "invalid_code": 0, "tested": 0, "rejected": 0,
+        "queue_active": 0, "queue_waiting": 0, "total_requests": 0,
+        "total_duration_ms": 0, "success_count": 0,
+        "consecutive_failures": 0, "cooldown_until": 0.0
+    }
 
 error_stats = {
     "DEEPSEEK_1": {
@@ -1166,35 +1182,69 @@ async def research_cycle():
     deep_symbols = random.sample(SYMBOLS, min(3, len(SYMBOLS)))
 
     async def _task(agent, symbol):
-        features = calculate_features(symbol)
-        if not features:
+        agent_name = agent["name"]
+        stats = state["stats"][agent_name]
+
+        # فحص نظام التبريد قبل دخول الطابور
+        if time.time() < stats["cooldown_until"]:
             return
-        hypothesis, code, duration_ms = await run_agent_with_retries(agent, features)
-        if not code:
-            return
+
+        stats["total_requests"] += 1
+        stats["queue_waiting"] += 1
+
         try:
-            algo_id = await asyncio.to_thread(save_algorithm, agent, symbol, hypothesis or "", code)
-            result = await asyncio.to_thread(backtest, symbol, code, algo_id)
-            if algo_id:
-                await asyncio.to_thread(update_algorithm_score, algo_id, result)
-                await asyncio.to_thread(save_trades_batch, algo_id, result.get("trades", []))
-                status = "TESTED" if (
-                    result["total_trades"] >= 30 and
-                    result["win_rate"] >= 50 and
-                    result["profit_factor"] >= 1.2 and
-                    result["max_drawdown"] <= 20
-                ) else "REJECTED"
-                if status == "TESTED":
-                    state["stats"][agent["name"]]["tested"] += 1
-                else:
-                    state["stats"][agent["name"]]["rejected"] += 1
-                logging.info(
-                    f"✅ {agent['name']} {symbol}: score={result['score']} "
-                    f"wr={result['win_rate']}% pf={result['profit_factor']} dd={result['max_drawdown']} "
-                    f"trades={result['total_trades']} -> {status}"
-                )
+            async with agent_semaphores[agent_name]:
+                stats["queue_waiting"] -= 1
+                stats["queue_active"] += 1
+
+                try:
+                    # فحص التبريد مرة أخرى بعد الخروج من الطابور (ربما توقف أثناء الانتظار)
+                    if time.time() < stats["cooldown_until"]:
+                        return
+
+                    features = await asyncio.to_thread(calculate_features, symbol)
+                    if not features:
+                        return
+
+                    hypothesis, code, duration_ms = await run_agent_with_retries(agent, features)
+
+                    if code:
+                        stats["success_count"] += 1
+                        stats["total_duration_ms"] += duration_ms
+                        stats["consecutive_failures"] = 0
+                    else:
+                        stats["consecutive_failures"] += 1
+                        if stats["consecutive_failures"] >= 5:
+                            logging.warning(f"🚨 {agent_name} hit 5 consecutive failures! Cooling down for 10 minutes.")
+                            stats["cooldown_until"] = time.time() + 600
+                        return # Abort processing for this symbol
+
+                    algo_id = await asyncio.to_thread(save_algorithm, agent, symbol, hypothesis or "", code)
+                    result = await asyncio.to_thread(backtest, symbol, code, algo_id)
+                    if algo_id:
+                        await asyncio.to_thread(update_algorithm_score, algo_id, result)
+                        await asyncio.to_thread(save_trades_batch, algo_id, result.get("trades", []))
+                        status = "TESTED" if (
+                            result["total_trades"] >= 30 and
+                            result["win_rate"] >= 50 and
+                            result["profit_factor"] >= 1.2 and
+                            result["max_drawdown"] <= 20
+                        ) else "REJECTED"
+                        if status == "TESTED":
+                            stats["tested"] += 1
+                        else:
+                            stats["rejected"] += 1
+                        logging.info(
+                            f"✅ {agent_name} {symbol}: score={result['score']} "
+                            f"wr={result['win_rate']}% pf={result['profit_factor']} dd={result['max_drawdown']} "
+                            f"trades={result['total_trades']} -> {status}"
+                        )
+                finally:
+                    stats["queue_active"] -= 1
+        except asyncio.CancelledError:
+            stats["queue_waiting"] = max(0, stats["queue_waiting"] - 1)
         except Exception as e:
-            logging.error(f"❌ task error {agent['name']} {symbol}: {e}")
+            logging.error(f"❌ task error {agent_name} {symbol}: {e}")
             logging.error(traceback.format_exc())
 
     llama = next(a for a in AGENTS if a["role"] == "fast")
@@ -1360,6 +1410,38 @@ def build_agents_report():
         lines.append("")
     return "\n".join(lines).strip()
 
+
+def build_queue_report():
+    lines = ["📡 حالة طوابير الذكاء الاصطناعي", ""]
+    for agent in AGENTS:
+        name = agent["name"]
+        d = state["stats"].get(name, {})
+        active = d.get("queue_active", 0)
+        waiting = d.get("queue_waiting", 0)
+        total = d.get("total_requests", 0)
+        succ = d.get("success_count", 0)
+        dur = d.get("total_duration_ms", 0)
+        avg_sec = (dur / succ / 1000.0) if succ > 0 else 0.0
+
+        icon = agent.get("emoji", "🤖")
+        lines.append(f"{icon} {name}")
+
+        cooldown = d.get("cooldown_until", 0.0)
+        if time.time() < cooldown:
+            rem = int((cooldown - time.time()) / 60)
+            lines.append(f"  🛑 في فترة التبريد (Cooldown) لـ {rem} دقيقة")
+
+        limit = AGENT_CONCURRENCY.get(name, 1)
+        lines.append(f"  🔄 قيد التنفيذ: {active} / {limit}")
+        lines.append(f"  ⏳ في الانتظار: {waiting}")
+        lines.append(f"  📨 إجمالي الطلبات: {total}")
+        lines.append(f"  ⏱ متوسط الاستجابة: {avg_sec:.1f} ثانية")
+        lines.append("")
+
+    timeout_total = sum(d.get("api_timeout", 0) for d in state["stats"].values())
+    lines.append(f"🚨 الطلبات الملغاة بسبب الفشل: {timeout_total}")
+    return "\n".join(lines).strip()
+
 # ============================================================
 # PAGINATION HELPER
 # ============================================================
@@ -1482,6 +1564,7 @@ async def telegram_loop():
 /trades - آخر الصفقات الورقية
 /error - تقرير الأخطاء التفصيلي
 /agents - أداء النماذج
+/queue - حالة طوابير النماذج (والتبريد)
 /help - هذه الرسالة
 """
                     await asyncio.to_thread(telegram_send, chat_id, reply)
@@ -1501,6 +1584,7 @@ Commands:
 /error       - تقرير الأخطاء التفصيلي بالعربية
 /errors      - Same as /error
 /agents      - Per-model performance
+/queue       - حالة طوابير النماذج (والتبريد)
 /help        - This message
 """
                     await asyncio.to_thread(telegram_send, chat_id, reply)
@@ -1624,6 +1708,10 @@ Commands:
                 elif cmd == "/agents":
                     report = build_agents_report()
                     await asyncio.to_thread(telegram_send, chat_id, report)
+                    
+                elif cmd in ("/queue", "/q"):
+                    report = build_queue_report()
+                    await asyncio.to_thread(telegram_send, chat_id, report)
 
         except Exception as e:
             logging.error("❌ telegram_loop error: %s", e)
@@ -1648,6 +1736,12 @@ async def preload_all():
 async def main():
     logging.info("%s STARTING", APP_NAME)
     await asyncio.to_thread(init_database)
+    
+    # تهيئة الطوابير (Semaphores) لكل نموذج
+    for agent in AGENTS:
+        limit = AGENT_CONCURRENCY.get(agent["name"], 1)
+        agent_semaphores[agent["name"]] = asyncio.Semaphore(limit)
+        
     await preload_all()
 
     await asyncio.gather(
