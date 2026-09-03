@@ -57,6 +57,7 @@ import logging
 import threading
 import traceback
 import random
+import concurrent.futures
 import builtins as _py_builtins
 from collections import deque
 from datetime import datetime, timezone
@@ -848,7 +849,13 @@ async def run_agent_with_retries(agent, features):
     for attempt in range(1, max_attempts + 1):
         start = time.time()
         try:
-            text, error = await asyncio.to_thread(call_agent_sync, agent, features)
+            # حماية مزدوجة: المهلة الخاصة بالاتصال + مهلة قاطعة من asyncio لتحرير الطابور فوراً
+            text, error = await asyncio.wait_for(
+                asyncio.to_thread(call_agent_sync, agent, features),
+                timeout=timeout + 15
+            )
+        except asyncio.TimeoutError:
+            text, error = None, "Timeout (asyncio strict limit)"
         except Exception as e:
             text, error = None, str(e)
         elapsed_ms = int((time.time() - start) * 1000)
@@ -1735,6 +1742,14 @@ async def preload_all():
 
 async def main():
     logging.info("%s STARTING", APP_NAME)
+    
+    # --- الإصلاح الجذري (Thread Starvation Fix) ---
+    # توسيع مسارات بايثون من 5 (الافتراضي للسيرفرات) إلى 64
+    # لضمان عدم توقف التليجرام والباك تيست أثناء انتظار ردود الذكاء الاصطناعي الطويلة
+    loop = asyncio.get_running_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+    loop.set_default_executor(executor)
+    
     await asyncio.to_thread(init_database)
     
     # تهيئة الطوابير (Semaphores) لكل نموذج
