@@ -1,6 +1,6 @@
 # ============================================================
 # AI ALGORITHM LAB - main.py
-# Binance USDâ“ˆ-M Futures + NVIDIA AI + MemoryDB/PostgreSQL + Telegram
+# Binance USDⓈ-M Futures + NVIDIA AI + MemoryDB/PostgreSQL + Telegram
 # ============================================================
 # Requirements:
 #   pip install requests numpy pandas websockets psycopg2-binary
@@ -42,11 +42,9 @@
 # 14. Klines limit=1500; TESTED only if trades>=30 & win_rate>=50% &
 #     profit_factor>=1.2 & max_drawdown<=20, otherwise REJECTED; new
 #     commands /error /errors /agents /algorithms (alias of /list).
-# 15. Telegram UX: /list pagination via the inline "â¬‡ï¸ More" button
-#     (live page flip through editMessageText, callback queries are
-#     consumed in the update loop + answerCallbackQuery) and a dynamic
-#     /best that falls back to the highest score ever reached (even if
-#     REJECTED) while showing its real status.
+# 15. Pagination for /list with inline "More" button.
+# 16. /best now returns highest score algorithm (even if REJECTED)
+#     and shows its status.
 # ============================================================
 
 import os
@@ -116,7 +114,7 @@ AGENTS = [
         "id": 1,
         "name": "DEEPSEEK_1",
         "role": "deep",
-        "emoji": "ðŸ§ ",
+        "emoji": "🧠",
         "model": "deepseek-ai/deepseek-v4-flash-0731",
         "api_key": os.getenv("NVIDIA_API_KEY_1", "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"),
         "temperature": 1.0,
@@ -129,7 +127,7 @@ AGENTS = [
         "id": 2,
         "name": "DEEPSEEK_2",
         "role": "deep",
-        "emoji": "ðŸ§ ",
+        "emoji": "🧠",
         "model": "deepseek-ai/deepseek-v4-flash-0731",
         "api_key": os.getenv("NVIDIA_API_KEY_2", "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"),
         "temperature": 1.0,
@@ -142,7 +140,7 @@ AGENTS = [
         "id": 3,
         "name": "KIMI",
         "role": "deep",
-        "emoji": "ðŸŒ™",
+        "emoji": "🌙",
         "model": "moonshotai/kimi-k3",
         "api_key": os.getenv("NVIDIA_API_KEY_3", "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"),
         "temperature": 1.0,
@@ -155,7 +153,7 @@ AGENTS = [
         "id": 4,
         "name": "LLAMA",
         "role": "fast",
-        "emoji": "ðŸ¦™",
+        "emoji": "🦙",
         "model": "meta/llama-3.2-90b-vision-instruct",
         "api_key": os.getenv("NVIDIA_API_KEY_4", "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"),
         "temperature": 1.0,
@@ -211,7 +209,7 @@ state = {
     }
 }
 
-# Ø³Ø¬Ù„ ØªÙØµÙŠÙ„ÙŠ Ù„Ø£Ø®Ø·Ø§Ø¡ ÙƒÙ„ Ù†Ù…ÙˆØ°Ø¬ (ÙŠØºØ°ÙŠ Ø£Ù…Ø± /error ÙÙŠ Ø§Ù„ØªÙ„ÙŠØ¬Ø±Ø§Ù…)
+# سجل تفصيلي لأخطاء كل نموذج (يغذي أمر /error في التليجرام)
 error_stats = {
     "DEEPSEEK_1": {
         "timeout": 0,
@@ -287,7 +285,7 @@ def _db_run(sql, params=None, fetch="none"):
             conn.commit()
             return rows if rows is not None else True
     except Exception as e:
-        logging.error("âŒ DB operation failed: %s | SQL: %s", e, str(sql)[:200])
+        logging.error("❌ DB operation failed: %s | SQL: %s", e, str(sql)[:200])
         if conn is not None:
             try:
                 conn.rollback()
@@ -305,7 +303,7 @@ def _db_run(sql, params=None, fetch="none"):
 def init_database():
     if MEMORY_MODE:
         reason = "psycopg2 not installed" if not PSYCOPG2_AVAILABLE else "no DATABASE_URL configured"
-        logging.info("ðŸŸ¡ Running in MEMORY MODE (%s - Everything works fine locally)", reason)
+        logging.info("🟡 Running in MEMORY MODE (%s - Everything works fine locally)", reason)
         return True
     sql = """
     CREATE TABLE IF NOT EXISTS algorithms (
@@ -350,9 +348,9 @@ def init_database():
     """
     result = _db_run(sql)
     if result is None:
-        logging.error("âŒ init_database FAILED")
+        logging.error("❌ init_database FAILED")
         return False
-    logging.info("âœ… PostgreSQL tables created successfully")
+    logging.info("✅ PostgreSQL tables created successfully")
     return True
 
 
@@ -389,7 +387,7 @@ def save_algorithm(agent, symbol, hypothesis, code):
         fetch="one",
     )
     if row is None:
-        logging.error("âŒ save_algorithm FAILED for agent %s", agent["name"])
+        logging.error("❌ save_algorithm FAILED for agent %s", agent["name"])
         return None
     return row["id"]
 
@@ -403,7 +401,7 @@ def update_algorithm_score(algorithm_id, result):
     profit_factor = result.get("profit_factor", 0)
     max_drawdown = result.get("max_drawdown", 0)
 
-    # Ø§Ù„Ø´Ø±ÙˆØ· Ø§Ù„Ø¯Ù†ÙŠØ§ Ù„Ø§Ø¹ØªÙ…Ø§Ø¯ Ø§Ù„Ø®ÙˆØ§Ø±Ø²Ù…ÙŠØ© Ù„ØªÙƒÙˆÙ† ØµØ§Ù„Ø­Ø© Ù„Ù„ØªØ¯Ø§ÙˆÙ„
+    # الشروط الدنيا لاعتماد الخوارزمية لتكون صالحة للتداول
     if total_trades >= 30 and win_rate >= 50 and profit_factor >= 1.2 and max_drawdown <= 20:
         status = "TESTED"
     else:
@@ -458,7 +456,7 @@ def save_trades_batch(algorithm_id, trades):
                 )
         conn.commit()
     except Exception as e:
-        logging.error("âŒ save_trades_batch FAILED: %s", e)
+        logging.error("❌ save_trades_batch FAILED: %s", e)
         if conn is not None:
             try:
                 conn.rollback()
@@ -472,24 +470,22 @@ def save_trades_batch(algorithm_id, trades):
                 pass
 
 
+# ======================== تم التعديل هنا ========================
 def get_best_algorithm():
+    """إرجاع الخوارزمية ذات أعلى سكور (حتى لو لم تكن TESTED)."""
     if MEMORY_MODE:
-        tested = [a for a in memory_db["algorithms"] if a.get("status") == "TESTED"]
-        if tested:
-            return sorted(tested, key=lambda x: x["score"], reverse=True)[0]
-        # Ø¥Ø°Ø§ Ù„Ù… ØªÙ†Ø¬Ø­ Ø£ÙŠ Ø®ÙˆØ§Ø±Ø²Ù…ÙŠØ© Ø¨Ø¹Ø¯ØŒ Ø£Ø­Ø¶Ø± Ø£Ø¹Ù„Ù‰ Ø³ÙƒÙˆØ± Ø­ØªÙ‰ Ù„Ùˆ ÙƒØ§Ù†Øª Ù…Ø±ÙÙˆØ¶Ø©
-        if memory_db["algorithms"]:
-            return sorted(memory_db["algorithms"], key=lambda x: x["score"], reverse=True)[0]
-        return None
-
+        if not memory_db["algorithms"]:
+            return None
+        # نأخذ أعلى سكور بشكل عام
+        return max(memory_db["algorithms"], key=lambda x: x.get("score", -float('inf')))
+    # نبحث أولاً عن TESTED
     row = _db_run(
         "SELECT * FROM algorithms WHERE status='TESTED' ORDER BY score DESC LIMIT 1",
         fetch="one",
     )
     if row:
         return row
-
-    # Ø¥Ø°Ø§ Ù„Ù… ØªÙ†Ø¬Ø­ Ø£ÙŠ Ø®ÙˆØ§Ø±Ø²Ù…ÙŠØ© Ø¨Ø¹Ø¯ØŒ Ø£Ø­Ø¶Ø± Ø£Ø¹Ù„Ù‰ Ø³ÙƒÙˆØ± Ø­ØªÙ‰ Ù„Ùˆ ÙƒØ§Ù†Øª Ù…Ø±ÙÙˆØ¶Ø©
+    # إذا لم يوجد TESTED، نأخذ أعلى سكور من الكل
     row = _db_run(
         "SELECT * FROM algorithms ORDER BY score DESC LIMIT 1",
         fetch="one",
@@ -509,8 +505,11 @@ def get_recent_trades(limit=10):
 
 
 def get_algorithms_list(limit=4, offset=0):
+    """جلب الخوارزميات مع إمكانية التحديد (للـ pagination)."""
     if MEMORY_MODE:
-        return list(reversed(memory_db["algorithms"]))[offset : offset + limit]
+        # ترتيب تنازلي حسب تاريخ الإنشاء (الأحدث أولاً) باستخدام created_at إن وجد
+        sorted_algos = sorted(memory_db["algorithms"], key=lambda x: x.get("created_at", x.get("id", 0)), reverse=True)
+        return sorted_algos[offset:offset+limit]
     rows = _db_run(
         "SELECT id, agent_name, symbol, score, created_at FROM algorithms ORDER BY created_at DESC LIMIT %s OFFSET %s",
         (limit, offset),
@@ -533,15 +532,15 @@ def get_algo_by_id(algo_id):
 # ============================================================
 
 def fetch_klines_sync(symbol, retries=3):
-    """Ø¬Ù„Ø¨ Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª Ù…Ø¨Ø§Ø´Ø±Ø© Ù…Ù† Ù…Ù†ØµØ© Ø¨ÙŠÙ†Ø§Ù†Ø³ Ù…Ø¹ Ø¥Ø¹Ø§Ø¯Ø© Ù…Ø­Ø§ÙˆÙ„Ø© ÙˆØªØ³Ø¬ÙŠÙ„ Ù…ÙØµÙ„."""
+    """جلب البيانات مباشرة من منصة بينانس مع إعادة محاولة وتسجيل مفصل."""
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval=1m&limit=1500"
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(url, timeout=15)
             if resp.status_code != 200:
-                logging.error(f"âŒ Binance HTTP {resp.status_code} for {symbol}: {resp.text[:200]}")
+                logging.error(f"❌ Binance HTTP {resp.status_code} for {symbol}: {resp.text[:200]}")
                 if resp.status_code == 451:
-                    logging.error("ðŸš« Binance 451: Unavailable for legal reasons (likely US region). Consider using a VPN/proxy or deploy in EU region.")
+                    logging.error("🚫 Binance 451: Unavailable for legal reasons (likely US region). Consider using a VPN/proxy or deploy in EU region.")
                 raise requests.exceptions.HTTPError(f"HTTP {resp.status_code}")
             data = resp.json()
             if isinstance(data, dict):
@@ -551,7 +550,7 @@ def fetch_klines_sync(symbol, retries=3):
                 raise ValueError(f"Binance returned empty klines for {symbol}")
             return data
         except Exception as e:
-            logging.warning(f"âš ï¸ Attempt {attempt}/{retries} failed for {symbol}: {e}")
+            logging.warning(f"⚠️ Attempt {attempt}/{retries} failed for {symbol}: {e}")
             if attempt < retries:
                 time.sleep(2 ** attempt)  # exponential backoff
     raise Exception(f"Failed to fetch {symbol} after {retries} attempts")
@@ -559,7 +558,7 @@ def fetch_klines_sync(symbol, retries=3):
 
 async def preload_market_data(symbol):
     try:
-        logging.info(f"ðŸ“¥ Fetching historical data: {symbol.upper()}")
+        logging.info(f"📥 Fetching historical data: {symbol.upper()}")
         data = await asyncio.to_thread(fetch_klines_sync, symbol)
         candles = []
         for row in data:
@@ -572,15 +571,15 @@ async def preload_market_data(symbol):
                 "volume": float(row[5]),
             })
         if not candles:
-            logging.error(f"âŒ Empty klines payload for {symbol}")
+            logging.error(f"❌ Empty klines payload for {symbol}")
             return False
         market_cache["candles_1m"][symbol].clear()
         market_cache["candles_1m"][symbol].extend(candles)
         market_cache["prices"][symbol] = candles[-1]["close"]
-        logging.info(f"âœ… {symbol}: loaded {len(candles)} candles")
+        logging.info(f"✅ {symbol}: loaded {len(candles)} candles")
         return True
     except Exception as e:
-        logging.error(f"âŒ Failed to fetch {symbol}: {e}")
+        logging.error(f"❌ Failed to fetch {symbol}: {e}")
         return False
 
 # ============================================================
@@ -598,7 +597,7 @@ def build_ws_url():
 
 async def websocket_worker():
     if not WEBSOCKETS_AVAILABLE:
-        logging.error("âŒ 'websockets' package not installed - live market stream disabled (install: pip install websockets)")
+        logging.error("❌ 'websockets' package not installed - live market stream disabled (install: pip install websockets)")
         return
     url = build_ws_url()
     while True:
@@ -657,7 +656,7 @@ async def websocket_worker():
 def calculate_features(symbol):
     candles = list(market_cache["candles_1m"][symbol])
     if len(candles) < 20:
-        logging.warning(f"âš ï¸ {symbol}: only {len(candles)} candles (< 20), not enough data")
+        logging.warning(f"⚠️ {symbol}: only {len(candles)} candles (< 20), not enough data")
         return None
 
     trades = list(market_cache["trades"][symbol])
@@ -798,173 +797,68 @@ MARKET DATA SNAPSHOT:
 
 {json.dumps(features, indent=2)[:12000]} """
 
-
 def call_agent_sync(agent, features):
-    prompt = build_prompt(features)
-    headers = {
-        "Authorization": f"Bearer {agent['api_key']}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    payload = {
-        "model": agent["model"],
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": agent["temperature"],
-        "max_tokens": agent.get("max_tokens", 8000),
-        "stream": False,
-    }
-    if agent.get("reasoning_effort"):
-        payload["reasoning_effort"] = agent["reasoning_effort"]
-
-    response = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=agent.get("request_timeout", 110))
-    if response.status_code != 200:
-        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
-    try:
-        data = response.json()
-    except ValueError:
-        raise RuntimeError(f"Non-JSON response from NVIDIA API: {response.text[:300]}")
-
-    choices = data.get("choices") or []
-    if not choices:
-        raise ValueError(f"Empty 'choices' in NVIDIA response: {str(data)[:200]}")
-    message = choices[0].get("message") or {}
-    content = message.get("content")
-    if not content or not str(content).strip():
-        # Some reasoning models put the answer in a separate field
-        content = message.get("reasoning_content") or ""
-    if not content or not str(content).strip():
-        raise ValueError("NVIDIA returned empty content")
-    return content
-
+prompt = build_prompt(features)
+headers = {
+"Authorization": f"Bearer {agent['api_key']}",
+"Content-Type": "application/json",
+"Accept": "application/json",
+}
+payload = {
+"model": agent["model"],
+"messages": [{"role": "user", "content": prompt}],
+"temperature": agent["temperature"],
+"max_tokens": agent.get("max_tokens", 8000),
+"stream": False,
+}
+if agent.get("reasoning_effort"):
+payload["reasoning_effort"] = agent["reasoning_effort"]
 
 async def run_agent_with_retries(agent, features):
-    agent_name = agent["name"]
-    max_attempts = agent.get("max_attempts", 3)
-    timeout = agent.get("request_timeout", 300)
-    start_total = time.time()
-    timeout_on_last_attempt = False
+agent_name = agent["name"]
+max_attempts = agent.get("max_attempts", 3)
+timeout = agent.get("request_timeout", 300)
+start_total = time.time()
+timeout_on_last_attempt = False
 
-    for attempt in range(1, max_attempts + 1):
-        logging.info(f"ðŸ¤– {agent_name} | Attempt {attempt}/{max_attempts}")
-        try:
-            # NOTE: on timeout the worker thread keeps running until the HTTP
-            # request finishes on its own; this is acceptable and bounded.
-            result = await asyncio.wait_for(
-                asyncio.to_thread(call_agent_sync, agent, features),
-                timeout=timeout
-            )
-            if result and len(str(result).strip()) > 50:
-                duration = int((time.time() - start_total) * 1000)
-                await asyncio.to_thread(log_agent, agent, "SUCCESS", f"Attempt {attempt} succeeded", duration)
-                logging.info(f"âœ… {agent_name} succeeded on attempt {attempt}")
-                return {
-                    "agent": agent,
-                    "status": "SUCCESS",
-                    "attempt": attempt,
-                    "content": result,
-                }
-            else:
-                logging.warning(f"âš ï¸ {agent_name} returned empty or invalid response on attempt {attempt}")
-                error_stats[agent_name]["empty_response"] += 1
-                error_stats[agent_name]["last_error"] = "Ø§Ù„Ù†Ù…ÙˆØ°Ø¬ Ø£Ø¹Ø§Ø¯ Ø±Ø¯Ù‹Ø§ ÙØ§Ø±ØºÙ‹Ø§ Ø£Ùˆ Ù‚ØµÙŠØ±Ù‹Ø§ Ø¬Ø¯Ù‹Ø§ (Ø£Ù‚Ù„ Ù…Ù† 50 Ø­Ø±ÙÙ‹Ø§)."
-                error_stats[agent_name]["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        except asyncio.TimeoutError:
-            logging.warning(f"â± {agent_name} timeout on attempt {attempt} ({timeout}s)")
-            error_stats[agent_name]["timeout"] += 1
-            error_stats[agent_name]["last_error"] = f"Ø§Ù†ØªÙ‡Øª Ù…Ù‡Ù„Ø© Ø§Ù†ØªØ¸Ø§Ø± {timeout} Ø«Ø§Ù†ÙŠØ© Ø¯ÙˆÙ† ÙˆØµÙˆÙ„ Ø±Ø¯ ÙƒØ§Ù…Ù„."
-            error_stats[agent_name]["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if attempt == max_attempts:
-                state["stats"][agent_name]["api_timeout"] += 1
-                timeout_on_last_attempt = True
-        except Exception as e:
-            logging.warning(f"âš ï¸ {agent_name} error on attempt {attempt}: {e}")
-            if isinstance(e, requests.exceptions.ConnectionError):
-                err_category = "connection"
-                err_message = "Ø§Ù†Ù‚Ø·Ø¹ Ø§Ù„Ø§ØªØµØ§Ù„ Ø¨Ø®ÙˆØ§Ø¯Ù… NVIDIA Ø£Ø«Ù†Ø§Ø¡ Ø¥Ø±Ø³Ø§Ù„ Ø§Ù„Ø·Ù„Ø¨."
-            elif isinstance(e, requests.exceptions.Timeout):
-                err_category = "connection"
-                err_message = "Ø§Ù†Ù‚Ø·Ø¹ Ø§Ù„Ø§ØªØµØ§Ù„ Ø£Ø«Ù†Ø§Ø¡ Ø§Ù†ØªØ¸Ø§Ø± Ø§Ù„Ø§Ø³ØªØ¬Ø§Ø¨Ø© Ù…Ù† NVIDIA (Ø§Ù†Ù‚Ø·Ø§Ø¹ Ø´Ø¨ÙƒÙŠ)."
-            elif isinstance(e, ValueError):
-                err_category = "invalid_response"
-                err_message = "Ø±Ø¯ ØºÙŠØ± ØµØ§Ù„Ø­ Ù…Ù† NVIDIA API (JSON Ù…ÙƒØ³ÙˆØ± Ø£Ùˆ Ù…Ø­ØªÙˆÙ‰ ÙØ§Ø±Øº)."
-            else:
-                err_category = "api_error"
-                err_message = f"Ø®Ø·Ø£ Ù…Ù† NVIDIA API: {str(e)[:200]}"
-            error_stats[agent_name][err_category] += 1
-            error_stats[agent_name]["last_error"] = err_message
-            error_stats[agent_name]["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+============================================================
 
-        if attempt < max_attempts:
-            wait = 15 * attempt
-            logging.info(f"â³ {agent_name} waiting {wait}s before next attempt")
-            await asyncio.sleep(wait)
+PARSE & VALIDATE AI OUTPUT
 
-    duration = int((time.time() - start_total) * 1000)
-    await asyncio.to_thread(log_agent, agent, "FAILED", f"All {max_attempts} attempts failed", duration)
-    # Ø¥Ø°Ø§ Ù„Ù… ÙŠÙƒÙ† Ø§Ù„Ø®Ø·Ø£ timeoutØŒ Ù†Ø³Ø¬Ù„Ù‡ ÙƒØ®Ø·Ø£ Ø¹Ø§Ù… (Ù…Ø¯Ù…Ø¬ Ù…Ø¹ Ø§Ù„Ø¹Ø¯Ø§Ø¯ Ù„ØªØ³Ù‡ÙŠÙ„ Ø§Ù„Ù‚Ø±Ø§Ø¡Ø©)
-    # Ù…Ù„Ø§Ø­Ø¸Ø©: Ù†Ø³ØªØ®Ø¯Ù… Ø¹Ù„Ù…Ø§Ù‹ Ù…Ø­Ù„ÙŠØ§Ù‹ Ø¨Ø¯Ù„ ÙØ­Øµ Ø§Ù„Ø¹Ø¯Ø§Ø¯ Ø§Ù„ØªØ±Ø§ÙƒÙ…ÙŠ Ø­ØªÙ‰ Ù„Ø§ ØªÙÙ‚Ø¯ Ø£ÙŠ
-    # Ø¹Ù…Ù„ÙŠØ© ÙØ§Ø´Ù„Ø© Ø§Ù„Ø¹Ø¯Ù‘ (Ù†ÙØ³ Ù†ÙŠØ© Ø§Ù„ÙƒÙˆØ¯ Ø§Ù„Ø£ØµÙ„ÙŠ Ù…Ø¹ ØªØµØ­ÙŠØ­ Ø§Ù„Ø¹Ø¯Ù‘ Ø¨ÙŠÙ† Ø§Ù„Ø¯ÙˆØ±Ø§Øª)
-    if not timeout_on_last_attempt:
-        state["stats"][agent_name]["api_timeout"] += 1
-    logging.error(f"âŒ {agent_name} failed after {max_attempts} attempts")
-    return {
-        "agent": agent,
-        "status": "FAILED",
-        "attempt": max_attempts,
-        "content": None,
-    }
-
-# ============================================================
-# PARSE & VALIDATE AI OUTPUT
-# ============================================================
+============================================================
 
 def parse_ai_output(text):
-    """Extract (hypothesis, code). Tolerant to markdown formatting."""
-    if not text:
-        return None, None
-    cleaned = str(text).replace("**", "")
-
-    hypothesis = ""
-    m_hyp = re.search(r"HYPOTHESIS\s*:", cleaned, re.IGNORECASE)
-    if m_hyp:
-        rest = cleaned[m_hyp.end():]
-        m_code = re.search(r"CODE\s*:", rest, re.IGNORECASE)
-        if m_code:
-            hypothesis = rest[:m_code.start()].strip()
-        else:
-            hypothesis = rest.strip()
-
-    code = _extract_code_block(cleaned)
-    return hypothesis, code
-
+"""Extract (hypothesis, code). Tolerant to markdown formatting."""
+if not text:
+return None, None
+cleaned = str(text).replace("**", "")
 
 def _extract_code_block(text):
-    """Return the generate_signal python code from a model answer."""
-    # 1) Prefer fenced blocks (```python / ```py / plain ```)
-    for m in re.finditer(r"```(?:python|py)?[ \t]*\r?\n", text, re.IGNORECASE):
-        rest = text[m.end():]
-        if "```" in rest:
-            block = rest.split("```", 1)[0]
-        else:
-            block = rest  # response was truncated before the closing fence
-        block = block.strip()
-        if "def generate_signal" in block:
-            return block
-    # 2) Fallback: raw function in the text
-    idx = text.find("def generate_signal")
-    if idx != -1:
-        code = text[idx:]
-        if "```" in code:
-            code = code.split("```", 1)[0]
-        return code.strip()
-    return None
-
+"""Return the generate_signal python code from a model answer."""
+# 1) Prefer fenced blocks (python / py / plain )
+    for m in re.finditer(r"(?:python|py)?[ \t]*\r?\n", text, re.IGNORECASE):
+rest = text[m.end():]
+if "" in rest:
+            block = rest.split("", 1)[0]
+else:
+block = rest  # response was truncated before the closing fence
+block = block.strip()
+if "def generate_signal" in block:
+return block
+# 2) Fallback: raw function in the text
+idx = text.find("def generate_signal")
+if idx != -1:
+code = text[idx:]
+if "" in code:
+            code = code.split("", 1)[0]
+return code.strip()
+return None
 
 _FORBIDDEN_CODE_PATTERNS = [
-    r"\bimport\b",
-    r"\bfrom\s+[\w.]+\s+import\b",
-    r"__import__",
-    r"\bopen\s*\(",
+r"\bimport\b",
+r"\bfrom\s+[\w.]+\s+import\b",
+r"import",
+r"\bopen\s*\(",
     r"\bexec\s*\(",
     r"\beval\s*\(",
     r"\bcompile\s*\(",
@@ -981,800 +875,316 @@ _FORBIDDEN_CODE_PATTERNS = [
     r"\bshutil\b",
 ]
 
-
 def validate_code(code):
-    if not code:
-        return False, "No code"
-    if "def generate_signal" not in code:
-        return False, "generate_signal missing"
-    # Strip comments and string literals before scanning, so words like
-    # "requests" or "os." inside comments/docstrings cannot cause false
-    # rejections (word-boundary regex also prevents "cos." -> "os.").
-    scanned = re.sub(r"#.*", "", code)
-    scanned = re.sub(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", "", scanned)
-    for pattern in _FORBIDDEN_CODE_PATTERNS:
-        if re.search(pattern, scanned):
-            return False, f"Forbidden pattern: {pattern}"
-    try:
-        compile(code, "<ai_algorithm>", "exec")
-        return True, "OK"
-    except SyntaxError as e:
-        return False, f"SyntaxError: {e}"
-    except Exception as e:
-        return False, str(e)
+if not code:
+return False, "No code"
+if "def generate_signal" not in code:
+return False, "generate_signal missing"
+# Strip comments and string literals before scanning, so words like
+# "requests" or "os." inside comments/docstrings cannot cause false
+# rejections (word-boundary regex also prevents "cos." -> "os.").
+scanned = re.sub(r"#.", "", code)
+scanned = re.sub(r"'(?:\.|[^'\])'|"(?:\.|[^"\])*"", "", scanned)
+for pattern in _FORBIDDEN_CODE_PATTERNS:
+if re.search(pattern, scanned):
+return False, f"Forbidden pattern: {pattern}"
+try:
+compile(code, "<ai_algorithm>", "exec")
+return True, "OK"
+except SyntaxError as e:
+return False, f"SyntaxError: {e}"
+except Exception as e:
+return False, str(e)
 
-# ============================================================
-# SANDBOX FOR GENERATED INDICATORS
-# ============================================================
+============================================================
 
-# Full builtins minus the dangerous ones. The previous tiny whitelist
-# (abs/min/max/len/range/float/int) made almost every AI algorithm
-# crash with NameError (sum, sorted, zip, enumerate, list...).
+SANDBOX FOR GENERATED INDICATORS
+
+============================================================
+
+Full builtins minus the dangerous ones. The previous tiny whitelist
+
+(abs/min/max/len/range/float/int) made almost every AI algorithm
+
+crash with NameError (sum, sorted, zip, enumerate, list...).
+
 _BUILTIN_BLACKLIST = {
-    "__import__", "open", "exec", "eval", "compile", "input", "breakpoint",
-    "exit", "quit", "help", "license", "credits", "globals", "locals", "vars",
-    "setattr", "delattr",
+"import", "open", "exec", "eval", "compile", "input", "breakpoint",
+"exit", "quit", "help", "license", "credits", "globals", "locals", "vars",
+"setattr", "delattr",
 }
 
 SAFE_BUILTINS = {
-    name: obj
-    for name, obj in vars(_py_builtins).items()
-    if name not in _BUILTIN_BLACKLIST
+name: obj
+for name, obj in vars(_py_builtins).items()
+if name not in _BUILTIN_BLACKLIST
 }
 
-
 def _run_with_timeout(fn, args, timeout_s):
-    """Run fn(*args) in a daemon thread with a hard timeout."""
-    box = {}
-
-    def _target():
-        try:
-            box["result"] = fn(*args)
-        except BaseException as e:  # propagated to the caller below
-            box["error"] = e
-
-    worker = threading.Thread(target=_target, daemon=True)
-    worker.start()
-    worker.join(timeout_s)
-    if worker.is_alive():
-        raise TimeoutError(f"Algorithm execution exceeded {timeout_s}s (possible infinite loop)")
-    if "error" in box:
-        raise box["error"]
-    return box.get("result")
-
+"""Run fn(*args) in a daemon thread with a hard timeout."""
+box = {}
 
 def _normalize_signals(signals, df):
-    """Coerce the indicator output into a clean numeric Series aligned to df."""
-    if isinstance(signals, pd.DataFrame):
-        if signals.shape[1] != 1:
-            raise ValueError("generate_signal must return a single column")
-        signals = signals.iloc[:, 0]
-    if isinstance(signals, pd.Series):
-        raw = signals.to_numpy()
-    elif isinstance(signals, (list, tuple, np.ndarray)):
-        raw = np.asarray(signals)
-    else:
-        raise TypeError("generate_signal must return a Series / list / array")
-    if len(raw) != len(df):
-        raise ValueError(f"generate_signal returned {len(raw)} values, expected {len(df)}")
-    numeric = pd.to_numeric(pd.Series(raw), errors="coerce")
-    numeric = numeric.set_axis(df.index)
-    return numeric.clip(-1, 1).fillna(0).astype(float)
-
+"""Coerce the indicator output into a clean numeric Series aligned to df."""
+if isinstance(signals, pd.DataFrame):
+if signals.shape[1] != 1:
+raise ValueError("generate_signal must return a single column")
+signals = signals.iloc[:, 0]
+if isinstance(signals, pd.Series):
+raw = signals.to_numpy()
+elif isinstance(signals, (list, tuple, np.ndarray)):
+raw = np.asarray(signals)
+else:
+raise TypeError("generate_signal must return a Series / list / array")
+if len(raw) != len(df):
+raise ValueError(f"generate_signal returned {len(raw)} values, expected {len(df)}")
+numeric = pd.to_numeric(pd.Series(raw), errors="coerce")
+numeric = numeric.set_axis(df.index)
+return numeric.clip(-1, 1).fillna(0).astype(float)
 
 def run_algorithm(code, df):
-    safe_globals = {
-        "np": np,
-        "pd": pd,
-        "math": math,
-        "__builtins__": SAFE_BUILTINS,
-        "__name__": "ai_algorithm",
-    }
-    local_vars = {}
-    exec(code, safe_globals, local_vars)  # sandboxed + pre-validated code
-    fn = local_vars.get("generate_signal")
-    if not callable(fn):
-        raise ValueError("generate_signal missing or not callable")
-    signals = _run_with_timeout(fn, (df.copy(),), 30)
-    return _normalize_signals(signals, df)
+safe_globals = {
+"np": np,
+"pd": pd,
+"math": math,
+"builtins": SAFE_BUILTINS,
+"name": "ai_algorithm",
+}
+local_vars = {}
+exec(code, safe_globals, local_vars)  # sandboxed + pre-validated code
+fn = local_vars.get("generate_signal")
+if not callable(fn):
+raise ValueError("generate_signal missing or not callable")
+signals = _run_with_timeout(fn, (df.copy(),), 30)
+return _normalize_signals(signals, df)
 
-# ============================================================
-# BACKTEST
-# ============================================================
+============================================================
+
+BACKTEST
+
+============================================================
 
 def _ms_to_dt(ms):
-    """Convert Binance open_time (ms epoch) to a timezone-aware datetime.
-
-    This is required for the PostgreSQL TIMESTAMPTZ columns - raw ints
-    made every paper_trades INSERT fail silently before.
-    """
-    if ms is None:
-        return None
-    if isinstance(ms, (int, float)):
-        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
-    return ms
-
+"""Convert Binance open_time (ms epoch) to a timezone-aware datetime.
 
 def backtest(symbol, code, algorithm_id=None):
-    candles = list(market_cache["candles_1m"][symbol])
-    if len(candles) < 20:
-        return {
-            "symbol": symbol.upper(),
-            "total_trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": 0,
-            "profit_factor": 0,
-            "max_drawdown": 0,
-            "score": 0,
-            "trades": [],
-        }
+candles = list(market_cache["candles_1m"][symbol])
+if len(candles) < 20:
+return {
+"symbol": symbol.upper(),
+"total_trades": 0,
+"wins": 0,
+"losses": 0,
+"win_rate": 0,
+"profit_factor": 0,
+"max_drawdown": 0,
+"score": 0,
+"trades": [],
+}
 
-    df = pd.DataFrame(candles)
-    try:
-        signals = run_algorithm(code, df)
-    except Exception as e:
-        logging.error("ALGORITHM EXECUTION FAILED: %s", e)
-        return {
-            "symbol": symbol.upper(),
-            "total_trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": 0,
-            "profit_factor": 0,
-            "max_drawdown": 100,
-            "score": -100,
-            "trades": [],
-        }
+============================================================
 
-    position = None
-    equity = 1000.0
-    peak = equity
-    max_drawdown = 0.0
-    wins = 0
-    losses = 0
-    profits = []
-    loss_sum = 0.0
-    TP = 0.004
-    SL = 0.0025
-    trades_record = []
+RESEARCH CYCLE & LOOP
 
-    for i in range(10, len(df) - 1):
-        price = float(df["close"].iloc[i])
-        high = float(df["high"].iloc[i])
-        low = float(df["low"].iloc[i])
-        signal = int(signals.iloc[i])
-
-        if position is None:
-            if signal == 1:
-                position = {
-                    "side": "LONG",
-                    "entry": price,
-                    "tp": price * (1 + TP),
-                    "sl": price * (1 - SL),
-                    "opened_at": _ms_to_dt(df["open_time"].iloc[i]),
-                }
-            elif signal == -1:
-                position = {
-                    "side": "SHORT",
-                    "entry": price,
-                    "tp": price * (1 - TP),
-                    "sl": price * (1 + SL),
-                    "opened_at": _ms_to_dt(df["open_time"].iloc[i]),
-                }
-        else:
-            exit_price = None
-            if position["side"] == "LONG":
-                if low <= position["sl"]:
-                    exit_price = position["sl"]
-                elif high >= position["tp"]:
-                    exit_price = position["tp"]
-            else:
-                if high >= position["sl"]:
-                    exit_price = position["sl"]
-                elif low <= position["tp"]:
-                    exit_price = position["tp"]
-
-            if exit_price:
-                entry = position["entry"]
-                if position["side"] == "LONG":
-                    pnl_pct = (exit_price - entry) / entry
-                else:
-                    pnl_pct = (entry - exit_price) / entry
-
-                equity *= (1 + pnl_pct)
-                profits.append(pnl_pct)
-                if pnl_pct > 0:
-                    wins += 1
-                else:
-                    losses += 1
-                    loss_sum += abs(pnl_pct)
-
-                peak = max(peak, equity)
-                dd = (peak - equity) / peak
-                max_drawdown = max(max_drawdown, dd)
-
-                trade_record = {
-                    "symbol": symbol.upper(),
-                    "side": position["side"],
-                    "entry_price": entry,
-                    "take_profit": position["tp"],
-                    "stop_loss": position["sl"],
-                    "exit_price": exit_price,
-                    "status": "CLOSED",
-                    "pnl_percent": round(pnl_pct * 100, 4),
-                    "opened_at": position["opened_at"],
-                    "closed_at": _ms_to_dt(df["open_time"].iloc[i]),
-                }
-                trades_record.append(trade_record)
-                position = None
-
-    total = wins + losses
-    win_rate = wins / total * 100 if total else 0
-    profit_sum = sum(x for x in profits if x > 0)
-
-    if loss_sum == 0:
-        profit_factor = 9999.0 if profit_sum > 0 else 0.0
-    else:
-        profit_factor = profit_sum / loss_sum
-
-    score = win_rate * 0.40 + min(profit_factor, 5) * 10 - max_drawdown * 100 * 0.30
-
-    result = {
-        "symbol": symbol.upper(),
-        "total_trades": total,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": round(win_rate, 4),
-        "profit_factor": round(profit_factor, 4),
-        "max_drawdown": round(max_drawdown * 100, 4),
-        "score": round(score, 4),
-        "trades": trades_record,
-    }
-
-    if algorithm_id and trades_record:
-        save_trades_batch(algorithm_id, trades_record)
-
-    return result
-
-# ============================================================
-# RESEARCH CYCLE & LOOP
-# ============================================================
+============================================================
 
 async def research_cycle():
-    state["cycle"] += 1
-    cycle_num = state["cycle"]
-    logging.info(f"ðŸ”¬ CYCLE {cycle_num} START")
-
-    import random
-    # Ø§Ø®ØªÙŠØ§Ø± 3 Ø¹Ù…Ù„Ø§Øª Ø¹Ø´ÙˆØ§Ø¦ÙŠØ§Ù‹ ÙÙŠ Ù‡Ø°Ù‡ Ø§Ù„Ø¯ÙˆØ±Ø© Ù„ØªØ±ÙƒØ² Ø¹Ù„ÙŠÙ‡Ø§ Ø§Ù„Ù†Ù…Ø§Ø°Ø¬ Ø§Ù„Ø¹Ù…ÙŠÙ‚Ø© (DeepSeek, Kimi)
-    deep_research_symbols = random.sample(SYMBOLS, 3) if len(SYMBOLS) >= 3 else SYMBOLS
-
-    for symbol in SYMBOLS:
-        # run in a worker thread so pandas never blocks the event loop
-        features = await asyncio.to_thread(calculate_features, symbol)
-        if not features:
-            continue
-
-        logging.info(f"ðŸ¤– Starting AI agents for {symbol}...")
-        tasks = []
-        for agent in AGENTS:
-            if agent["api_key"].startswith("PUT_"):
-                continue
-
-            # ØªØ®ØµÙŠØµ Ø§Ù„Ø£Ø¯ÙˆØ§Ø±: LLAMA ÙŠØ¹Ù…Ù„ Ø¹Ù„Ù‰ ÙƒÙ„ Ø´ÙŠØ¡ØŒ Ø§Ù„Ø¨Ù‚ÙŠØ© Ø¹Ù„Ù‰ 3 Ø¹Ù…Ù„Ø§Øª ÙÙ‚Ø·
-            if agent["name"] != "LLAMA" and symbol not in deep_research_symbols:
-                continue
-
-            tasks.append(run_agent_with_retries(agent, features))
-
-        if not tasks:
-            continue
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for result in results:
-            if isinstance(result, Exception):
-                logging.error(f"âŒ Agent task raised exception: {result}")
-                continue
-
-            agent = result["agent"]
-            agent_name = agent["name"]
-
-            if result["status"] != "SUCCESS":
-                continue
-
-            state["stats"][agent_name]["api_ok"] += 1
-
-            hypothesis, code = parse_ai_output(result["content"])
-            valid, reason = validate_code(code)
-            if not valid:
-                state["stats"][agent_name]["invalid_code"] += 1
-                await asyncio.to_thread(log_agent, agent, "INVALID_CODE", reason)
-                continue
-
-            algorithm_id = await asyncio.to_thread(save_algorithm, agent, symbol.upper(), hypothesis, code)
-            if algorithm_id is None:
-                continue
-
-            # backtest (exec + pandas + DB writes) runs off the event loop
-            bt_result = await asyncio.to_thread(backtest, symbol, code, algorithm_id)
-            await asyncio.to_thread(update_algorithm_score, algorithm_id, bt_result)
-
-            # ØªØªØ¨Ø¹ Ø¬ÙˆØ¯Ø© Ø§Ù„Ø®ÙˆØ§Ø±Ø²Ù…ÙŠØ©
-            if bt_result.get("total_trades", 0) >= 30 and bt_result.get("win_rate", 0) >= 50 and bt_result.get("profit_factor", 0) >= 1.2 and bt_result.get("max_drawdown", 100) <= 20:
-                state["stats"][agent_name]["tested"] += 1
-            else:
-                state["stats"][agent_name]["rejected"] += 1
-
-            logging.info(
-                "ðŸŽ¯ AI=%s | SYMBOL=%s | SCORE=%s | TRADES=%s",
-                agent["name"], symbol.upper(),
-                bt_result["score"], bt_result["total_trades"]
-            )
-
-    logging.info(f"ðŸ”¬ CYCLE {cycle_num} COMPLETE")
-
+state["cycle"] += 1
+cycle_num = state["cycle"]
+logging.info(f"🔬 CYCLE {cycle_num} START")
 
 async def research_loop():
-    while True:
-        try:
-            await research_cycle()
-        except Exception:
-            logging.error(traceback.format_exc())
-        logging.info("â³ Sleeping 30 minutes...")
-        await asyncio.sleep(30 * 60)
+while True:
+try:
+await research_cycle()
+except Exception:
+logging.error(traceback.format_exc())
+logging.info("⏳ Sleeping 30 minutes...")
+await asyncio.sleep(30 * 60)
 
-# ============================================================
-# TELEGRAM API (with conflict handling)
-# ============================================================
+============================================================
+
+TELEGRAM API (with conflict handling)
+
+============================================================
 
 TELEGRAM_OFFSET = 0
 
-
 def telegram_request(method, payload=None, http_timeout=45):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-    try:
-        response = requests.post(url, json=payload or {}, timeout=http_timeout)
-        return response.json()
-    except Exception as e:
-        logging.error("âŒ telegram_request %s failed: %s", method, e)
-        return {"ok": False, "error_code": -1, "description": str(e)}
+url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
+try:
+response = requests.post(url, json=payload or {}, timeout=http_timeout)
+return response.json()
+except Exception as e:
+logging.error("❌ telegram_request %s failed: %s", method, e)
+return {"ok": False, "error_code": -1, "description": str(e)}
 
+======================== تم التعديل هنا ========================
 
 def telegram_send(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": str(text)[:4000]}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    return telegram_request("sendMessage", payload)
-
+"""إرسال رسالة مع إمكانية إضافة أزرار Inline."""
+payload = {"chat_id": chat_id, "text": str(text)[:4000]}
+if reply_markup:
+payload["reply_markup"] = reply_markup
+return telegram_request("sendMessage", payload)
 
 def telegram_edit_message(chat_id, message_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": str(text)[:4000]}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    return telegram_request("editMessageText", payload)
-
+"""تعديل رسالة موجودة (للتحديث عند الضغط على زر)."""
+payload = {"chat_id": chat_id, "message_id": message_id, "text": str(text)[:4000]}
+if reply_markup:
+payload["reply_markup"] = reply_markup
+return telegram_request("editMessageText", payload)
 
 def telegram_skip_backlog():
-    """On startup, discard queued old updates so restarts don't replay
-    every old command (which previously re-executed on each restart)."""
-    global TELEGRAM_OFFSET
-    data = telegram_request("getUpdates", {"offset": -1, "limit": 1})
-    if data and data.get("ok"):
-        result = data.get("result", [])
-        if result:
-            TELEGRAM_OFFSET = result[-1]["update_id"] + 1
-            logging.info("â†ªï¸ Telegram backlog skipped (old commands will not be replayed)")
-
+"""On startup, discard queued old updates so restarts don't replay
+every old command (which previously re-executed on each restart)."""
+global TELEGRAM_OFFSET
+data = telegram_request("getUpdates", {"offset": -1, "limit": 1})
+if data and data.get("ok"):
+result = data.get("result", [])
+if result:
+TELEGRAM_OFFSET = result[-1]["update_id"] + 1
+logging.info("↪️ Telegram backlog skipped (old commands will not be replayed)")
 
 def _fmt_price(value):
-    if value is None:
-        return "OPEN"
-    try:
-        return f"{float(value):.6g}"
-    except (TypeError, ValueError):
-        return "?"
+if value is None:
+return "OPEN"
+try:
+return f"{float(value):.6g}"
+except (TypeError, ValueError):
+return "?"
 
+============================================================
 
-# ============================================================
-# TELEGRAM REPORT BUILDERS (Arabic error & performance reports)
-# ============================================================
+TELEGRAM REPORT BUILDERS (Arabic error & performance reports)
+
+============================================================
 
 _ERROR_CATEGORY_LABELS = [
-    ("timeout", "â± Ø§Ù†ØªÙ‡Øª Ø§Ù„Ù…Ù‡Ù„Ø©"),
-    ("connection", "ðŸ”Œ Ø§Ù†Ù‚Ø·Ø§Ø¹ Ø§ØªØµØ§Ù„"),
-    ("empty_response", "ðŸ“­ Ø±Ø¯ ÙØ§Ø±Øº"),
-    ("invalid_response", "ðŸ“­ Ø±Ø¯ ØºÙŠØ± ØµØ§Ù„Ø­"),
-    ("api_error", "âš ï¸ Ø®Ø·Ø£ API"),
+("timeout", "⏱ انتهت المهلة"),
+("connection", "🔌 انقطاع اتصال"),
+("empty_response", "📭 رد فارغ"),
+("invalid_response", "📭 رد غير صالح"),
+("api_error", "⚠️ خطأ API"),
 ]
 
 _ERROR_DIAGNOSIS = {
-    "timeout": "Ø¨Ø·Ø¡ Ø§Ø³ØªØ¬Ø§Ø¨Ø© NVIDIA ÙˆØ§Ù„Ù†Ù…Ø§Ø°Ø¬ Ø°Ø§Øª Ø§Ù„ØªÙÙƒÙŠØ± Ø§Ù„Ø·ÙˆÙŠÙ„.",
-    "connection": "Ø§Ù†Ù‚Ø·Ø§Ø¹ Ø§Ù„Ø§ØªØµØ§Ù„ Ø¨Ø´Ø¨ÙƒØ© NVIDIA API.",
-    "empty_response": "Ø§Ù„Ù†Ù…Ø§Ø°Ø¬ ØªØ¹ÙŠØ¯ Ø±Ø¯ÙˆØ¯Ù‹Ø§ ÙØ§Ø±ØºØ© Ø£Ùˆ ØºÙŠØ± Ù…ÙƒØªÙ…Ù„Ø©.",
-    "invalid_response": "Ø±Ø¯ÙˆØ¯ ØºÙŠØ± ØµØ§Ù„Ø­Ø© (JSON Ù…ÙƒØ³ÙˆØ± Ø£Ùˆ Ø¨Ù†ÙŠØ© ØºÙŠØ± Ù…ØªÙˆÙ‚Ø¹Ø©) Ù…Ù† NVIDIA API.",
-    "api_error": "Ø£Ø®Ø·Ø§Ø¡ Ù…Ù† NVIDIA API (ØªØ­Ù‚Ù‚ Ù…Ù† Ø§Ù„Ù…ÙØ§ØªÙŠØ­ ÙˆØ­Ø¯ÙˆØ¯ Ø§Ù„Ø§Ø³ØªØ®Ø¯Ø§Ù…).",
+"timeout": "بطء استجابة NVIDIA والنماذج ذات التفكير الطويل.",
+"connection": "انقطاع الاتصال بشبكة NVIDIA API.",
+"empty_response": "النماذج تعيد ردوداً فارغة أو غير مكتملة.",
+"invalid_response": "ردود غير صالحة (JSON مكسور أو بنية غير متوقعة) من NVIDIA API.",
+"api_error": "أخطاء من NVIDIA API (تحقق من المفاتيح وحدود الاستخدام).",
 }
 
-
 def _fmt_rate(rate):
-    """50.0 -> '50', 6.25 -> '6.25' (matches the report examples)."""
-    return f"{rate:.2f}".rstrip("0").rstrip(".") or "0"
-
+"""50.0 -> '50', 6.25 -> '6.25' (matches the report examples)."""
+return f"{rate:.2f}".rstrip("0").rstrip(".") or "0"
 
 def build_error_report():
-    """ØªÙ‚Ø±ÙŠØ± Ø§Ù„Ø£Ø®Ø·Ø§Ø¡ Ø§Ù„ØªÙØµÙŠÙ„ÙŠ Ø¨Ø§Ù„Ø¹Ø±Ø¨ÙŠØ© (ÙŠÙØ¹Ø±Ø¶ Ø¹Ø¨Ø± /error Ùˆ /errors)."""
-    total_failed = sum(d["api_timeout"] for d in state["stats"].values())
-    cat_totals = {
-        cat: sum(error_stats.get(a["name"], {}).get(cat, 0) for a in AGENTS)
-        for cat, _ in _ERROR_CATEGORY_LABELS
-    }
-
-    if total_failed == 0 and all(v == 0 for v in cat_totals.values()):
-        return f"ðŸš¨ ØªÙ‚Ø±ÙŠØ± Ø£Ø®Ø·Ø§Ø¡ {APP_NAME}\n\nâœ… Ù„Ø§ ØªÙˆØ¬Ø¯ Ø£Ø®Ø·Ø§Ø¡ Ù…Ø³Ø¬Ù„Ø© Ø­ØªÙ‰ Ø§Ù„Ø¢Ù†."
-
-    lines = [
-        f"ðŸš¨ ØªÙ‚Ø±ÙŠØ± Ø£Ø®Ø·Ø§Ø¡ {APP_NAME}",
-        "",
-        f"ðŸ“Š Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø­Ø§ÙˆÙ„Ø§Øª Ø§Ù„ÙØ§Ø´Ù„Ø©: {total_failed}",
-    ]
-
-    for agent in AGENTS:
-        name = agent["name"]
-        errs = error_stats.get(name, {})
-        lines.append("")
-        lines.append("â”â”â”â”â”â”â”â”â”â”â”â”â”â”")
-        lines.append("")
-        lines.append(f"{agent.get('emoji', 'ðŸ¤–')} {name}")
-        lines.append(f"âŒ ÙØ´Ù„: {state['stats'][name]['api_timeout']}")
-        lines.append("")
-        shown = 0
-        for cat, label in _ERROR_CATEGORY_LABELS:
-            count = errs.get(cat, 0)
-            if count > 0:
-                lines.append(f"{label}: {count}")
-                shown += 1
-        if shown == 0:
-            lines.append("âœ… Ù„Ø§ ØªÙˆØ¬Ø¯ Ø£Ø®Ø·Ø§Ø¡ Ù…ÙØµÙ„Ø©")
-        if errs.get("last_error"):
-            lines.append("")
-            lines.append("Ø¢Ø®Ø± Ø®Ø·Ø£:")
-            lines.append(str(errs["last_error"]))
-
-    # ---------- Ø§Ù„ØªØ´Ø®ÙŠØµ ----------
-    lines.append("")
-    lines.append("â”â”â”â”â”â”â”â”â”â”â”â”â”â”")
-    lines.append("")
-    lines.append("ðŸ“ˆ Ø§Ù„ØªØ´Ø®ÙŠØµ:")
-    lines.append("")
-
-    if any(cat_totals.values()):
-        dominant = max(cat_totals, key=lambda c: cat_totals[c])
-        lines.append("âš ï¸ Ø§Ù„Ù…Ø´ÙƒÙ„Ø© Ø§Ù„Ø±Ø¦ÙŠØ³ÙŠØ©:")
-        lines.append(_ERROR_DIAGNOSIS[dominant])
-        lines.append("")
-
-    failure_rates = {}
-    for agent in AGENTS:
-        d = state["stats"][agent["name"]]
-        calls = d["api_ok"] + d["api_timeout"]
-        if calls > 0:
-            failure_rates[agent["name"]] = d["api_timeout"] / calls
-    if failure_rates:
-        min_rate = min(failure_rates.values())
-        stable = [n for n, r in failure_rates.items() if r == min_rate]
-        lines.append("ðŸ¤– Ø§Ù„Ù†Ù…ÙˆØ°Ø¬ Ø§Ù„Ø£ÙƒØ«Ø± Ø§Ø³ØªÙ‚Ø±Ø§Ø±Ù‹Ø§:")
-        lines.append(" / ".join(stable))
-        lines.append("")
-
-    timeouts = {
-        agent["name"]: error_stats.get(agent["name"], {}).get("timeout", 0)
-        for agent in AGENTS
-    }
-    max_to = max(timeouts.values()) if timeouts else 0
-    if max_to > 0:
-        slow = [n for n, t in timeouts.items() if t == max_to]
-        lines.append("ðŸ§  Ø§Ù„Ù†Ù…ÙˆØ°Ø¬ Ø§Ù„Ø°ÙŠ ÙŠØ­ØªØ§Ø¬ ÙˆÙ‚ØªÙ‹Ø§ Ø£Ø·ÙˆÙ„:")
-        lines.append(" / ".join(slow))
-        lines.append("")
-
-    last_times = [
-        str(error_stats.get(a["name"], {}).get("last_time") or "")
-        for a in AGENTS
-    ]
-    last_times = [t for t in last_times if t]
-    if last_times:
-        lines.append("ðŸ•’ Ø¢Ø®Ø± Ø®Ø·Ø£:")
-        lines.append(max(last_times))
-
-    return "\n".join(lines).strip()
-
+"""تقرير الأخطاء التفصيلي بالعربية (يُعرض عبر /error و /errors)."""
+total_failed = sum(d["api_timeout"] for d in state["stats"].values())
+cat_totals = {
+cat: sum(error_stats.get(a["name"], {}).get(cat, 0) for a in AGENTS)
+for cat, _ in _ERROR_CATEGORY_LABELS
+}
 
 def build_agents_report():
-    """ØªÙ‚Ø±ÙŠØ± Ø£Ø¯Ø§Ø¡ Ø§Ù„Ù†Ù…Ø§Ø°Ø¬ (ÙŠÙØ¹Ø±Ø¶ Ø¹Ø¨Ø± /agents)."""
-    lines = ["ðŸ¤– Ø£Ø¯Ø§Ø¡ Ø§Ù„Ù†Ù…Ø§Ø°Ø¬", ""]
-    for agent in AGENTS:
-        name = agent["name"]
-        d = state["stats"].get(name, {})
-        ok = d.get("api_ok", 0)
-        fail = d.get("api_timeout", 0)
-        calls = ok + fail
-        rate = (ok / calls * 100) if calls else 0.0
-        lines.append(f"{agent.get('emoji', 'ðŸ¤–')} {name}")
-        lines.append(f"âœ… Ù†Ø¬Ø­: {ok}")
-        lines.append(f"âŒ ÙØ´Ù„: {fail}")
-        lines.append(f"ðŸ“Š Ù†Ø³Ø¨Ø© Ø§Ù„Ø§Ø³ØªØ¬Ø§Ø¨Ø©: {_fmt_rate(rate)}%")
-        lines.append("")
-    return "\n".join(lines).strip()
+"""تقرير أداء النماذج (يُعرض عبر /agents)."""
+lines = ["🤖 أداء النماذج", ""]
+for agent in AGENTS:
+name = agent["name"]
+d = state["stats"].get(name, {})
+ok = d.get("api_ok", 0)
+fail = d.get("api_timeout", 0)
+calls = ok + fail
+rate = (ok / calls * 100) if calls else 0.0
+lines.append(f"{agent.get('emoji', '🤖')} {name}")
+lines.append(f"✅ نجح: {ok}")
+lines.append(f"❌ فشل: {fail}")
+lines.append(f"📊 نسبة الاستجابة: {_fmt_rate(rate)}%")
+lines.append("")
+return "\n".join(lines).strip()
 
+============================================================
+
+TELEGRAM LOOP (مع دعم الأزرار)
+
+============================================================
 
 async def telegram_loop():
-    global TELEGRAM_OFFSET
-    await asyncio.to_thread(telegram_skip_backlog)
-    while True:
-        try:
-            # NOTE: HTTP timeout (45s) must be strictly greater than the
-            # long-poll timeout (25s), otherwise borderline read timeouts.
-            data = await asyncio.to_thread(
-                telegram_request,
-                "getUpdates",
-                {"offset": TELEGRAM_OFFSET, "timeout": 25},
-                45,
-            )
+global TELEGRAM_OFFSET
+await asyncio.to_thread(telegram_skip_backlog)
+while True:
+try:
+# NOTE: HTTP timeout (45s) must be strictly greater than the
+# long-poll timeout (25s), otherwise borderline read timeouts.
+data = await asyncio.to_thread(
+telegram_request,
+"getUpdates",
+{"offset": TELEGRAM_OFFSET, "timeout": 25},
+45,
+)
 
-            # Handle conflict (409) - multiple instances using same token
-            if data and not data.get("ok"):
-                if data.get("error_code") == 409:
-                    logging.error("ðŸš¨ TELEGRAM CONFLICT: Another instance is using this bot token. Ensure only one replica is running.")
-                    await asyncio.sleep(30)
-                    continue
-                logging.error(f"âŒ Telegram API error: {data}")
-                await asyncio.sleep(5)
-                continue
-
-            for update in (data or {}).get("result", []):
-                TELEGRAM_OFFSET = update["update_id"] + 1
-
-                # --- Ù…Ø¹Ø§Ù„Ø¬Ø© Ø¶ØºØ·Ø§Øª Ø§Ù„Ø£Ø²Ø±Ø§Ø± (Inline Buttons) ---
-                if "callback_query" in update:
-                    cq = update["callback_query"]
-                    cq_data = cq.get("data", "")
-                    cq_msg = cq.get("message", {}) or {}
-                    c_chat_id = cq_msg.get("chat", {}).get("id")
-                    c_msg_id = cq_msg.get("message_id")
-
-                    if c_chat_id and c_msg_id and cq_data.startswith("list_"):
-                        offset = int(cq_data.split("_")[1])
-                        algos = await asyncio.to_thread(get_algorithms_list, 4, offset)
-
-                        if not algos:
-                            await asyncio.to_thread(telegram_edit_message, c_chat_id, c_msg_id, "ðŸ“‹ No more algorithms.")
-                        else:
-                            page_num = (offset // 4) + 1
-                            lines = [f"ðŸ“‹ RECENT ALGORITHMS (Page {page_num})"]
-                            for a in algos:
-                                lines.append(
-                                    f"ID:{a.get('id')} | {a.get('agent_name') or '-'} | "
-                                    f"{a.get('symbol') or '-'} | Score:{a.get('score') or 0}"
-                                )
-                            reply_text = "\n".join(lines)
-
-                            next_algos = await asyncio.to_thread(get_algorithms_list, 1, offset + 4)
-                            reply_markup = None
-                            if next_algos:
-                                reply_markup = {
-                                    "inline_keyboard": [[
-                                        {"text": "â¬‡ï¸ More (Ø§Ù„Ù…Ø²ÙŠØ¯)", "callback_data": f"list_{offset + 4}"}
-                                    ]]
-                                }
-
-                            await asyncio.to_thread(telegram_edit_message, c_chat_id, c_msg_id, reply_text, reply_markup)
-
-                        # Ù„ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ø§Ø³ØªÙ„Ø§Ù… Ù„Ù„ØªÙ„ÙŠØ¬Ø±Ø§Ù… (Ø­ØªÙ‰ ÙŠØ®ØªÙÙŠ Ù…Ø¤Ø´Ø± Ø§Ù„ØªØ­Ù…ÙŠÙ„ Ù…Ù† Ø§Ù„Ø²Ø±)
-                        await asyncio.to_thread(telegram_request, "answerCallbackQuery", {"callback_query_id": cq["id"]})
-                    continue
-
-                # --- Ù…Ø¹Ø§Ù„Ø¬Ø© Ø§Ù„Ø±Ø³Ø§Ø¦Ù„ Ø§Ù„Ù†ØµÙŠØ© Ø§Ù„Ø¹Ø§Ø¯ÙŠØ© ---
-                message = update.get("message", {}) or {}
-                text = message.get("text") or ""
-                chat = message.get("chat", {}) or {}
-                chat_id = chat.get("id")
-                if not chat_id or not text:
-                    continue
-
-                if text == "/status":
-                    uptime = datetime.now(timezone.utc) - state["started_at"]
-                    db_mode = "ðŸŸ¡ Memory DB" if MEMORY_MODE else "ðŸŸ¢ PostgreSQL"
-
-                    stats_str = ""
-                    for name, d in state["stats"].items():
-                        total_calls = d['api_ok'] + d['api_timeout']
-                        api_rate = (d['api_ok'] / total_calls * 100) if total_calls else 0
-                        stats_str += f"\nâ–ªï¸ {name}:\n  API: {api_rate:.0f}% OK (Timeout: {d['api_timeout']})\n  Code Error: {d['invalid_code']}\n  Tested: {d['tested']} | Rejected: {d['rejected']}\n"
-
-                    reply = f"""
-ðŸ¤– {APP_NAME}
+🤖 {APP_NAME}
 {db_mode}
-â± Uptime: {uptime}
-ðŸ”„ Cycles: {state["cycle"]}
+⏱ Uptime: {uptime}
+🔄 Cycles: {state["cycle"]}
 
-ðŸ“Š Agent Performance Metrics:
+📊 Agent Performance Metrics:
 {stats_str}
 """
-                    await asyncio.to_thread(telegram_send, chat_id, reply)
+await asyncio.to_thread(telegram_send, chat_id, reply)
 
-                elif text in ["/error", "/errors"]:
-                    reply = build_error_report()
-                    await asyncio.to_thread(telegram_send, chat_id, reply)
+🏆 أفضل خوارزمية (حسب أعلى سكور)
 
-                elif text == "/agents":
-                    reply = build_agents_report()
-                    await asyncio.to_thread(telegram_send, chat_id, reply)
+🆔 ID: {best.get("id")}
+🤖 AI: {best.get("agent_name") or "-"}
+🧠 Model: {best.get("model_name") or "-"}
+📊 Symbol: {best.get("symbol") or "-"}
+⭐ Score: {best.get("score") or 0}
+🎯 Win Rate: {win_rate:.2f}%
+📈 Profit Factor: {profit_factor:.3f}
+📉 Max Drawdown: {max_drawdown:.2f}%
+🏷 الحالة: {status_str}
 
-                elif text in ["/best", "/scalping"]:
-                    best = await asyncio.to_thread(get_best_algorithm)
-                    if not best:
-                        reply = "â³ No algorithms evaluated yet."
-                        await asyncio.to_thread(telegram_send, chat_id, reply)
-                    else:
-                        win_rate = float(best.get("win_rate") or 0)
-                        profit_factor = float(best.get("profit_factor") or 0)
-                        max_drawdown = float(best.get("max_drawdown") or 0)
-                        hypothesis = str(best.get("hypothesis") or "")[:1200]
-
-                        # Ø¥Ø¸Ù‡Ø§Ø± Ø­Ø§Ù„Ø© Ø§Ù„Ø®ÙˆØ§Ø±Ø²Ù…ÙŠØ© Ù„ØªØ¹Ø±Ù Ø¥Ù† ÙƒØ§Ù†Øª ØµØ§Ù„Ø­Ø© Ø£Ù… Ù…Ø¬Ø±Ø¯ Ø£Ø¹Ù„Ù‰ Ø³ÙƒÙˆØ± Ù…Ø±ÙÙˆØ¶
-                        status_str = "âœ… TESTED (Ù…Ø®ØªØ¨Ø±Ø© ÙˆØµØ§Ù„Ø­Ø©)" if best.get("status") == "TESTED" else f"âŒ {best.get('status')} (Ø£Ø¹Ù„Ù‰ Ø³ÙƒÙˆØ± Ø­ØªÙ‰ Ø§Ù„Ø¢Ù†)"
-
-                        reply = f"""
-ðŸ† BEST ALGORITHM (Highest Score)
-
-ID: {best.get("id")}
-ðŸ¤– AI: {best.get("agent_name") or "-"}
-ðŸ§  Model: {best.get("model_name") or "-"}
-ðŸ“Š Symbol: {best.get("symbol") or "-"}
-â­ Score: {best.get("score") or 0}
-ðŸŽ¯ Win Rate: {win_rate:.2f}%
-ðŸ“ˆ Profit Factor: {profit_factor:.3f}
-ðŸ“‰ Max Drawdown: {max_drawdown:.2f}%
-ðŸ· Status: {status_str}
-
-ðŸ“ Hypothesis:
+📝 Hypothesis:
 {hypothesis}
 """
-                        await asyncio.to_thread(telegram_send, chat_id, reply)
+await asyncio.to_thread(telegram_send, chat_id, reply)
 
-                elif text.startswith("/code"):
-                    parts = text.split()
-                    if len(parts) < 2:
-                        reply = "Use: /code ID"
-                    else:
-                        algo_id = parts[1]
-                        algo = await asyncio.to_thread(get_algo_by_id, algo_id)
-                        if not algo:
-                            reply = "âŒ Algorithm not found"
-                        else:
-                            reply = f"ðŸ’» ALGORITHM #{algo.get('id')}\n\n{algo.get('code') or ''}"
-                    await asyncio.to_thread(telegram_send, chat_id, reply)
-
-                elif text == "/trades":
-                    trades = await asyncio.to_thread(get_recent_trades, 10)
-                    if not trades:
-                        reply = "ðŸ“Š No trades yet."
-                    else:
-                        lines = ["ðŸ“Š LAST TRADES"]
-                        for t in trades:
-                            pnl = t.get("pnl_percent")
-                            try:
-                                pnl_str = f"{float(pnl):.2f}" if pnl is not None else "-"
-                            except (TypeError, ValueError):
-                                pnl_str = "-"
-                            lines.append(
-                                f"ID:{t.get('id')} {t.get('symbol')} {t.get('side')} | "
-                                f"Entry:{_fmt_price(t.get('entry_price'))} | "
-                                f"Exit:{_fmt_price(t.get('exit_price'))} | "
-                                f"PnL:{pnl_str}%"
-                            )
-                        reply = "\n".join(lines)
-                    await asyncio.to_thread(telegram_send, chat_id, reply)
-
-                elif text in ["/list", "/algorithms"]:
-                    algos = await asyncio.to_thread(get_algorithms_list, 4, 0)
-                    if not algos:
-                        reply = "ðŸ“‹ No algorithms yet."
-                        await asyncio.to_thread(telegram_send, chat_id, reply)
-                    else:
-                        lines = ["ðŸ“‹ RECENT ALGORITHMS (Page 1)"]
-                        for a in algos:
-                            lines.append(
-                                f"ID:{a.get('id')} | {a.get('agent_name') or '-'} | "
-                                f"{a.get('symbol') or '-'} | Score:{a.get('score') or 0}"
-                            )
-                        reply = "\n".join(lines)
-
-                        # ØªØ­Ù‚Ù‚ Ø¥Ø°Ø§ ÙƒØ§Ù† Ù‡Ù†Ø§Ùƒ Ø§Ù„Ù…Ø²ÙŠØ¯ Ù„Ø¹Ø±Ø¶ Ø§Ù„Ø²Ø±
-                        next_algos = await asyncio.to_thread(get_algorithms_list, 1, 4)
-                        reply_markup = None
-                        if next_algos:
-                            reply_markup = {
-                                "inline_keyboard": [[
-                                    {"text": "â¬‡ï¸ More (Ø§Ù„Ù…Ø²ÙŠØ¯)", "callback_data": "list_4"}
-                                ]]
-                            }
-                        await asyncio.to_thread(telegram_send, chat_id, reply, reply_markup)
-
-                elif text in ["/start", "/help"]:
-                    reply = """
-ðŸ¤– AI ALGORITHM LAB
+🤖 AI ALGORITHM LAB
 
 Commands:
 /status      - System status
-/best        - Best algorithm
+/best        - Best algorithm (highest score)
 /scalping    - Same as /best
 /code ID     - Show algorithm code
 /trades      - Recent paper trades
-/list        - Recent algorithms
+/list        - Recent algorithms (paginated)
 /algorithms  - Same as /list
-/error       - ØªÙ‚Ø±ÙŠØ± Ø§Ù„Ø£Ø®Ø·Ø§Ø¡ Ø§Ù„ØªÙØµÙŠÙ„ÙŠ Ø¨Ø§Ù„Ø¹Ø±Ø¨ÙŠØ©
+/error       - تقرير الأخطاء التفصيلي بالعربية
 /errors      - Same as /error
 /agents      - Per-model performance
 /help        - This message
 """
-                    await asyncio.to_thread(telegram_send, chat_id, reply)
+await asyncio.to_thread(telegram_send, chat_id, reply)
 
-        except Exception as e:
-            logging.error("TELEGRAM ERROR: %s", e)
-            await asyncio.sleep(5)
+============================================================
 
-# ============================================================
-# MAIN
-# ============================================================
+MAIN
+
+============================================================
 
 async def preload_all():
-    """Preload all symbols with a concurrency limit (5) to avoid
-    hitting Binance REST rate limits with 30 simultaneous calls."""
-    semaphore = asyncio.Semaphore(5)
-
-    async def load(sym):
-        async with semaphore:
-            return await preload_market_data(sym)
-
-    return await asyncio.gather(*(load(s) for s in SYMBOLS), return_exceptions=True)
-
+"""Preload all symbols with a concurrency limit (5) to avoid
+hitting Binance REST rate limits with 30 simultaneous calls."""
+semaphore = asyncio.Semaphore(5)
 
 async def main():
-    logging.info("%s STARTING", APP_NAME)
+logging.info("%s STARTING", APP_NAME)
 
-    # Init database (or memory mode)
-    await asyncio.to_thread(init_database)
-
-    # Preload historical data directly from Binance REST
-    logging.info("ðŸ“¥ Preloading historical market data directly from Binance REST API...")
-    results = await preload_all()
-
-    success_count = 0
-    for i, r in enumerate(results):
-        if isinstance(r, Exception):
-            logging.error(f"âŒ Failed to load {SYMBOLS[i]}: {r}")
-        elif r is True:
-            success_count += 1
-        else:
-            logging.warning(f"âš ï¸ Failed to load {SYMBOLS[i]}")
-
-    logging.info(f"ðŸ“Š MARKET CACHE READY: {success_count}/{len(SYMBOLS)}")
-
-    if success_count == 0:
-        logging.error("âŒ No market data loaded. Bot will continue but AI research may not work.")
-
-    # Run core tasks
-    await asyncio.gather(
-        websocket_worker(),
-        research_loop(),
-        telegram_loop(),
-    )
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("ðŸ›‘ Shutdown requested (Ctrl+C). Bye!")
+if name == "main":
+try:
+asyncio.run(main())
+except KeyboardInterrupt:
+logging.info("🛑 Shutdown requested (Ctrl+C). Bye!")
